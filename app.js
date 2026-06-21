@@ -3,13 +3,13 @@ const FIREBASE_STORE_URL = "https://www.gstatic.com/firebasejs/10.12.5/firebase-
 
 const PHASE_LABELS = {
   lobby: "ロビー",
-  theme: "テーマ",
-  writing: "入力",
+  theme: "お題",
+  writing: "ワード入力",
   submit: "提出",
-  submitReview: "確認",
-  vote: "投票",
-  roundEnd: "ラウンド終了",
-  gameOver: "ゲーム終了"
+  submitReview: "結果確認",
+  vote: "うっかり投票",
+  roundEnd: "投票結果",
+  gameOver: "最終結果"
 };
 
 const DEFAULT_SETTINGS = {
@@ -117,7 +117,7 @@ class RoomStore {
           this.onRoom(this.room);
         },
         (error) => {
-          this.onError("ルーム状態を取得できませんでした。");
+          this.onError("ルームを読み込めませんでした。");
           console.error(error);
         }
       );
@@ -211,15 +211,25 @@ function render() {
       appState.room ? renderRoom() : renderEntry()
     )
   );
+  scrollSubmissionTracksToEnd();
+}
+
+function scrollSubmissionTracksToEnd() {
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".submission-track").forEach((track) => {
+      track.scrollLeft = track.scrollWidth;
+    });
+  });
 }
 
 function appShell(content) {
   const room = appState.room;
   const phase = room ? PHASE_LABELS[room.phase] : "未接続";
-  const roomText = room ? `ルーム ${room.id}` : "ルームなし";
+  const roomText = room ? `#${room.id}` : "未接続";
+  const shareUrl = room ? getShareUrl(room.id) : "";
   const localShareWarning =
     appState.syncMode === "local"
-      ? "Localモードではルームはこのブラウザ内だけに保存されます。同じ通常ブラウザの複数タブでは別ユーザとして確認できます。別ブラウザやプライベートブラウザから参加するにはFirebase設定が必要です。"
+      ? "Local: 同じブラウザの別タブで確認できます。"
       : "";
 
   return el(
@@ -228,13 +238,17 @@ function appShell(content) {
     el(
       "header",
       { class: "topbar" },
-      el("div", { class: "brand" }, el("span", { class: "brand-mark" }, "i"), el("span", {}, "ito helper")),
+      el("div", { class: "brand" }, el("span", { class: "brand-mark" }, "ito"), el("span", {}, "itoのお茶会")),
       el(
         "div",
         { class: "topbar-meta" },
         pill(appState.syncMode === "firebase" ? "Firebase" : "Local", appState.syncMode === "firebase" ? "ok" : "warn"),
-        pill(roomText, "muted"),
-        pill(phase, "info")
+        room
+          ? button(roomText, () => copyText(shareUrl), "pilllike muted", { title: "URLをコピー" })
+          : pill(roomText, "muted"),
+        pill(phase, "info"),
+        room ? button("URL", () => copyText(shareUrl), "secondary compact") : null,
+        room ? button("退出", leaveRoomUrl, "ghost compact") : null
       )
     ),
     appState.error ? el("div", { class: "banner error" }, appState.error) : null,
@@ -252,9 +266,9 @@ function renderEntry() {
       panel("ルームが見つかりません", [
         el("p", { class: "muted-text" }, `ID: ${appState.roomId}`),
         appState.syncMode === "local"
-          ? el("p", { class: "muted-text" }, "Localモードでは、他のブラウザで作成したルームは参照できません。")
+          ? el("p", { class: "muted-text" }, "Local のルームは同じブラウザ内だけで共有されます。")
           : null,
-        button("トップへ戻る", () => leaveRoomUrl(), "secondary")
+        button("戻る", () => leaveRoomUrl(), "secondary")
       ])
     );
   }
@@ -262,11 +276,10 @@ function renderEntry() {
   return el(
     "main",
     { class: "layout split" },
-    panel("ルーム作成", [
-      el("p", { class: "muted-text" }, "ホスト用の短命ルームを作成します。"),
-      button("ルームを作成", createRoom, "primary")
+    panel("ルームを作る", [
+      button("作成", createRoom, "primary")
     ]),
-    panel("ルーム参加", [
+    panel("ルームに入る", [
       el(
         "form",
         { class: "stack", onsubmit: handleRoomJoin },
@@ -293,7 +306,7 @@ function renderRoom() {
     gameOver: renderGameOver
   };
   const phaseView = views[room.phase] ? views[room.phase]() : panel("不明なフェーズ", [el("p", {}, room.phase)]);
-  const showSidePanel = room.phase !== "lobby" && room.phase !== "gameOver";
+  const showSidePanel = room.phase !== "gameOver";
 
   return el(
     "main",
@@ -315,13 +328,13 @@ function renderNameRegistration() {
   return el(
     "main",
     { class: "layout narrow" },
-    panel("名前登録", [
-      el("p", { class: "muted-text" }, `ルーム ${room.id}`),
+    panel("名前を登録", [
+      el("p", { class: "muted-text" }, `#${room.id}`),
       el(
         "form",
         { class: "stack", onsubmit: handleNameSubmit },
-        label("表示名", el("input", { name: "name", maxlength: "24", autocomplete: "name", required: true })),
-        button("登録", null, "primary", { type: "submit" })
+        label("名前", el("input", { name: "name", maxlength: "24", autocomplete: "name", required: true })),
+        button("参加", null, "primary", { type: "submit" })
       )
     ])
   );
@@ -329,9 +342,6 @@ function renderNameRegistration() {
 
 function renderRoomSummary() {
   const room = appState.room;
-  const player = getCurrentPlayer();
-  const host = isHost();
-  const shareUrl = getShareUrl(room.id);
   const displayedRound = room.currentRound ? room.currentRound.roundNumber : room.round;
 
   return el(
@@ -340,18 +350,36 @@ function renderRoomSummary() {
     el(
       "div",
       { class: "summary-grid" },
-      metric("ライフ", String(room.life)),
-      metric("ラウンド", `${displayedRound}/${room.settings.maxRounds}`),
-      metric("参加者", `${room.players.length}人`),
-      metric("あなた", player ? player.name : "-")
-    ),
+      lifeMetric(room.life),
+      metric("ラウンド", `${displayedRound}/${room.settings.maxRounds}`)
+    )
+  );
+}
+
+function lifeMetric(value) {
+  const maxVisibleHearts = 8;
+  const visible = Math.max(0, Math.min(value, maxVisibleHearts));
+  return el(
+    "div",
+    { class: "metric life-metric" },
+    el("span", {}, "ライフ"),
     el(
       "div",
-      { class: "room-actions" },
-      host ? pill("ホスト", "ok") : pill("参加者", "muted"),
-      button("URLコピー", () => copyText(shareUrl), "secondary"),
-      button("退出", leaveRoomUrl, "ghost")
+      { class: "life-row", "aria-label": `ライフ ${value}` },
+      el("div", { class: "heart-list" }, ...Array.from({ length: visible }, () => heartIcon())),
+      value > maxVisibleHearts ? el("strong", { class: "life-count" }, `x${value}`) : null,
+      value <= 0 ? el("strong", { class: "life-count" }, "0") : null
     )
+  );
+}
+
+function heartIcon() {
+  return el(
+    "svg",
+    { class: "heart-icon", viewBox: "0 0 24 24", "aria-hidden": "true" },
+    el("path", {
+      d: "M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+    })
   );
 }
 
@@ -359,6 +387,7 @@ function renderSidePanel() {
   const room = appState.room;
   const player = getCurrentPlayer();
   const settings = room.settings;
+  const isLobby = room.phase === "lobby";
 
   return el(
     "aside",
@@ -368,12 +397,12 @@ function renderSidePanel() {
       { class: "side-section" },
       el("h2", {}, "あなた"),
       el("p", { class: "side-value" }, player ? player.name : "-"),
-      el("div", { class: "side-pills" }, isHost() ? pill("ホスト", "ok") : pill("参加者", "muted"))
+      isHost() ? el("div", { class: "side-pills" }, pill("ホスト", "ok")) : null
     ),
     el(
       "section",
       { class: "side-section" },
-      el("h2", {}, "参加者"),
+      el("h2", {}, "メンバー"),
       el(
         "div",
         { class: "side-player-list" },
@@ -381,27 +410,41 @@ function renderSidePanel() {
           el(
             "div",
             { class: "side-player" },
-            el("span", {}, item.name),
-            el("small", {}, `戦犯 ${item.culpritTokens || 0}`)
+            el(
+              "div",
+              { class: "side-player-head" },
+              el("span", {}, item.name),
+              isPlayerHost(room, item.id) ? pill("ホスト", "ok") : null
+            ),
+            el("small", {}, `うっかり票 ${item.culpritTokens || 0}`)
           )
         )
       )
     ),
-    el(
-      "section",
-      { class: "side-section" },
-      el("h2", {}, "設定"),
-      renderRuleList([
-        ["ラウンド", `${settings.maxRounds}`],
-        ["初期ライフ", `${settings.initialLife}`],
-        ["カード増加", `${settings.cardIncrement}`],
-        ["1人上限", `${settings.cardLimit}`],
-        ["並べ替え", sortModeLabel(settings.sortMode)],
-        ["失敗時", pattern1LifeRuleLabel(settings.pattern1LifeRule)],
-        ["戦犯", settings.culpritTokens ? "ON" : "OFF"],
-        ["入力公開", inputVisibilityLabel(settings.inputVisibility)]
-      ])
-    )
+    isLobby
+      ? el(
+          "section",
+          { class: "side-section" },
+          renderLobbyActions()
+        )
+      : null,
+    isLobby
+      ? null
+      : el(
+          "section",
+          { class: "side-section" },
+          el("h2", {}, "ルール"),
+          renderRuleList([
+            ["ラウンド", `${settings.maxRounds}`],
+            ["ライフ", `${settings.initialLife}`],
+            ["追加", `${settings.cardIncrement}`],
+            ["手札上限", `${settings.cardLimit}`],
+            ["提出方式", sortModeLabel(settings.sortMode)],
+            ["失敗時", pattern1LifeRuleLabel(settings.pattern1LifeRule)],
+            ["うっかり投票", settings.culpritTokens ? "あり" : "なし"],
+            ["ワード公開", inputVisibilityLabel(settings.inputVisibility)]
+          ])
+        )
   );
 }
 
@@ -416,13 +459,17 @@ function renderRuleList(items) {
   );
 }
 
-function renderLobby() {
+function themeHero(roundNumber, theme) {
   return el(
     "div",
-    { class: "content-grid" },
-    panel("ゲーム設定", [renderSettingsForm()]),
-    panel("参加者", [renderPlayerList(), renderLobbyActions()])
+    { class: "round-hero" },
+    el("span", {}, `ラウンド ${roundNumber}`),
+    el("strong", {}, theme)
   );
+}
+
+function renderLobby() {
+  return panel("ルール設定", [renderSettingsForm()]);
 }
 
 function renderSettingsForm() {
@@ -432,38 +479,38 @@ function renderSettingsForm() {
   return el(
     "form",
     { class: "settings-grid", onchange: handleSettingsChange, onsubmit: preventFormSubmit },
-    label("ラウンド上限", el("input", { type: "number", name: "maxRounds", min: "1", max: "20", value: settings.maxRounds, disabled, required: true })),
-    label("初期ライフ", el("input", { type: "number", name: "initialLife", min: "1", max: "30", value: settings.initialLife, disabled, required: true })),
-    label("カード増加枚数", el("input", { type: "number", name: "cardIncrement", min: "1", max: "20", value: settings.cardIncrement, disabled, required: true })),
-    label("1人上限", el("input", { type: "number", name: "cardLimit", min: "1", max: "100", value: settings.cardLimit, disabled, required: true })),
+    label("ラウンド", el("input", { type: "number", name: "maxRounds", min: "1", max: "20", value: settings.maxRounds, disabled, required: true })),
+    label("ライフ", el("input", { type: "number", name: "initialLife", min: "1", max: "30", value: settings.initialLife, disabled, required: true })),
+    label("追加手札", el("input", { type: "number", name: "cardIncrement", min: "1", max: "20", value: settings.cardIncrement, disabled, required: true })),
+    label("手札上限", el("input", { type: "number", name: "cardLimit", min: "1", max: "100", value: settings.cardLimit, disabled, required: true })),
     el(
       "fieldset",
       { class: "field-span" },
-      el("legend", {}, "並べ替えルール"),
+      el("legend", {}, "提出方式"),
       radio("sortMode", "pattern1", "1枚ずつ提出", settings.sortMode === "pattern1", disabled),
-      radio("sortMode", "pattern2", "全カード一括判定（予定）", false, true)
+      radio("sortMode", "pattern2", "全カード一括（準備中）", false, true)
     ),
     el(
       "fieldset",
       { class: "field-span" },
-      el("legend", {}, "失敗時のライフ減少"),
-      radio("pattern1LifeRule", "flat", "飛ばした枚数によらず -1", settings.pattern1LifeRule === "flat", disabled),
-      radio("pattern1LifeRule", "skipped", "飛ばしたカード枚数分だけ減少", settings.pattern1LifeRule === "skipped", disabled)
+      el("legend", {}, "失敗時のライフ"),
+      radio("pattern1LifeRule", "flat", "一律 -1", settings.pattern1LifeRule === "flat", disabled),
+      radio("pattern1LifeRule", "skipped", "飛ばした枚数分", settings.pattern1LifeRule === "skipped", disabled)
     ),
     el(
       "fieldset",
       { class: "field-span" },
-      el("legend", {}, "入力内容の公開"),
-      radio("inputVisibility", "afterWriting", "全員入力後に公開", settings.inputVisibility === "afterWriting", disabled),
-      radio("inputVisibility", "live", "入力中から随時公開", settings.inputVisibility === "live", disabled)
+      el("legend", {}, "ワードの公開"),
+      radio("inputVisibility", "afterWriting", "全員入力後", settings.inputVisibility === "afterWriting", disabled),
+      radio("inputVisibility", "live", "入力中も表示", settings.inputVisibility === "live", disabled)
     ),
     label(
-      "戦犯トークン",
+      "うっかり投票",
       el(
         "select",
         { name: "culpritTokens", disabled },
-        option("true", "ON", settings.culpritTokens),
-        option("false", "OFF", !settings.culpritTokens)
+        option("true", "あり", settings.culpritTokens),
+        option("false", "なし", !settings.culpritTokens)
       )
     )
   );
@@ -474,7 +521,7 @@ function renderLobbyActions() {
   return el(
     "div",
     { class: "action-row" },
-    isHost() ? button("ゲーム開始", startGame, "primary", { disabled: !canStart }) : el("p", { class: "muted-text" }, "ホストの開始待ち")
+    isHost() ? button("開始", startGame, "primary", { disabled: !canStart }) : el("p", { class: "muted-text" }, "ホストの開始待ち")
   );
 }
 
@@ -488,7 +535,12 @@ function renderPlayerList(extraClass = "") {
         "div",
         { class: "player-row" },
         el("span", { class: "player-name" }, player.name),
-        el("span", { class: "player-meta" }, `戦犯 ${player.culpritTokens || 0}`)
+        el(
+          "div",
+          { class: "player-row-meta" },
+          isPlayerHost(room, player.id) ? pill("ホスト", "ok") : null,
+          el("span", { class: "player-meta" }, `うっかり票 ${player.culpritTokens || 0}`)
+        )
       )
     )
   );
@@ -496,27 +548,29 @@ function renderPlayerList(extraClass = "") {
 
 function renderTheme() {
   const nextRound = appState.room.round + 1;
-  return panel(`ラウンド ${nextRound} テーマ`, [
+  return panel(`ラウンド ${nextRound}`, [
     isHost()
       ? el(
           "form",
           { class: "stack", onsubmit: handleThemeSubmit },
-          label("テーマ", el("input", { name: "theme", maxlength: "80", required: true, autofocus: true })),
-          button("カード配布", null, "primary", { type: "submit" })
+          label("お題", el("input", { name: "theme", maxlength: "80", required: true, autofocus: true, placeholder: "雨の日の楽しみ" })),
+          button("カードを配る", null, "primary", { type: "submit" })
         )
-      : el("p", { class: "muted-text" }, "ホストのテーマ入力待ち")
+      : el("p", { class: "muted-text" }, "ホストのお題待ち")
   ]);
 }
 
 function renderWriting() {
   const round = appState.room.currentRound;
   const ownCards = getOwnActiveRoundCards();
+  const ownReady = ownCards.length > 0 && ownCards.every((card) => card.text.trim().length > 0);
   const allReady = round.cards.every((card) => card.text.trim().length > 0);
 
   return el(
     "div",
     { class: "content-grid" },
-    panel(`ラウンド ${round.roundNumber}: ${round.theme}`, [
+    panel("ワードを書く", [
+      themeHero(round.roundNumber, round.theme),
       el(
         "form",
         { class: "card-input-list", onsubmit: handleTextSubmit },
@@ -524,16 +578,23 @@ function renderWriting() {
           el(
             "div",
             { class: "number-card own" },
-            el("div", { class: "number-card-head" }, el("span", {}, `#${index + 1}`), el("strong", {}, String(card.number))),
-            label("入力", el("input", { name: card.id, maxlength: "80", value: card.text, required: true }))
+            el(
+              "div",
+              { class: "number-card-head" },
+              el("span", {}, `#${index + 1}`),
+              el("strong", { class: "card-number-chip graded", style: cardNumberStyle(card.number) }, String(card.number))
+            ),
+            label("この数字を表すワード", el("input", { name: card.id, maxlength: "80", value: card.text, placeholder: "短いワードで表す", disabled: ownReady, required: true }))
           )
         ),
-        ownCards.length ? button("入力を保存", null, "primary", { type: "submit" }) : el("p", { class: "muted-text" }, "自分のカードがありません。")
+        ownCards.length
+          ? button(ownReady ? "記入済み" : "保存", null, "primary", { type: "submit", disabled: ownReady })
+          : el("p", { class: "muted-text" }, "手札がありません")
       )
     ]),
     panel("入力状況", [
       renderInputProgress(),
-      el("p", { class: "muted-text" }, allReady ? "提出フェーズへ移動します。" : "全員の入力がそろうと自動で提出フェーズへ進みます。")
+      el("p", { class: "muted-text microcopy" }, allReady ? "全員入力済み" : "入力待ち")
     ])
   );
 }
@@ -555,7 +616,7 @@ function renderInputProgress() {
           el("span", { class: "player-name" }, player.name),
           renderVisibleInputTexts(cards)
         ),
-        pill(ready ? "入力済" : "未入力", ready ? "ok" : "warn")
+        pill(ready ? "入力済み" : "未入力", ready ? "ok" : "warn")
       );
     })
   );
@@ -566,51 +627,50 @@ function renderVisibleInputTexts(cards) {
   return el(
     "div",
     { class: "input-preview-list" },
-    ...cards.map((card, index) => el("small", {}, `${index + 1}. ${card.text || "未入力"}`))
+    ...cards.map((card, index) =>
+      el(
+        "div",
+        { class: `input-preview-card ${card.text ? "" : "empty"}` },
+        el("span", {}, `#${index + 1}`),
+        el("strong", {}, card.text || "未入力")
+      )
+    )
   );
 }
 
 function renderSubmit() {
   const round = appState.room.currentRound;
-  return panel(`ラウンド ${round.roundNumber}: ${round.theme}`, [
-    renderTableCards(),
-    renderOwnSubmitCards(),
-    round.submitLog.length ? renderSubmitLog() : null
+  return panel("場のカード", [
+    themeHero(round.roundNumber, round.theme),
+    renderSubmissionTrack(round),
+    renderTableCards({ showRevealed: false }),
+    renderOwnSubmitCards()
   ]);
 }
 
 function renderSubmitReview() {
   const room = appState.room;
   const round = room.currentRound;
+  const movesToVote = room.settings.culpritTokens && round.lifeLost > 0;
+  const movesToFinal = room.life <= 0 || round.roundNumber >= room.settings.maxRounds;
   const nextLabel =
-    room.settings.culpritTokens && round.lifeLost > 0
-      ? "戦犯投票へ進む"
-      : "ラウンド結果へ進む";
+    movesToVote
+      ? "うっかり投票へ"
+      : movesToFinal
+        ? "最終結果へ"
+        : "次のお題へ";
 
-  return panel(`ラウンド ${round.roundNumber}: 提出結果`, [
-    renderTableCards(),
-    round.submitLog.length ? renderSubmitLog() : null,
-    renderSubmitReviewSummary(),
+  return panel("結果確認", [
+    themeHero(round.roundNumber, round.theme),
+    renderSubmissionTrack(round),
+    renderTableCards({ showRevealed: false }),
     isHost()
       ? button(nextLabel, proceedAfterSubmitReview, "primary")
       : el("p", { class: "muted-text" }, "ホストの確認待ち")
   ]);
 }
 
-function renderSubmitReviewSummary() {
-  const room = appState.room;
-  const round = room.currentRound;
-  const afterPenalty = room.life;
-  return el(
-    "div",
-    { class: "round-summary" },
-    el("p", {}, `判定: ${round.lifeLost > 0 ? `失敗あり / ライフ -${round.lifeLost}` : "全成功"}`),
-    el("p", {}, `ライフ: ${round.lifeBefore} → ${afterPenalty}`),
-    afterPenalty > 0 ? el("p", { class: "muted-text" }, "次へ進むと生存ボーナスでライフが +1 されます。") : null
-  );
-}
-
-function renderTableCards() {
+function renderTableCards({ showRevealed = true } = {}) {
   const round = appState.room.currentRound;
   const activeCards = round.cards.filter((card) => !card.revealed);
   const revealedCards = round.cards.filter((card) => card.revealed);
@@ -620,7 +680,7 @@ function renderTableCards() {
     { class: "table-wrap" },
     activeCards.length
       ? [
-          el("h3", {}, "未公開カード"),
+          el("h3", {}, "未公開"),
           el(
             "div",
             { class: "table-cards" },
@@ -628,7 +688,7 @@ function renderTableCards() {
           )
         ]
       : null,
-    revealedCards.length
+    showRevealed && revealedCards.length
       ? el(
           "div",
           { class: "revealed-zone" },
@@ -639,18 +699,56 @@ function renderTableCards() {
   );
 }
 
+function renderSubmissionTrack(round) {
+  const revealedCards = round.cards
+    .filter((card) => card.revealed)
+    .sort((a, b) => a.number - b.number);
+  if (!revealedCards.length) return null;
+
+  return el(
+    "section",
+    { class: "submission-track-wrap" },
+    el("h3", {}, "提出結果"),
+    el(
+      "div",
+      { class: "submission-track" },
+      ...revealedCards.map((card) => renderSubmissionTrackCard(card))
+    )
+  );
+}
+
+function renderSubmissionTrackCard(card) {
+  const player = getPlayer(card.playerId);
+  const className = [
+    "submission-track-card",
+    card.skipped ? "skipped" : card.failed ? "failed-submission" : "success"
+  ].join(" ");
+
+  return el(
+    "article",
+    { class: className },
+    el("strong", {}, String(card.number)),
+    el("span", {}, card.text || "未入力"),
+    el("small", {}, player ? player.name : "不明")
+  );
+}
+
 function renderHintCard(card, revealed) {
   const player = getPlayer(card.playerId);
   const own = card.playerId === appState.playerId;
   const status = card.skipped ? "飛ばし" : card.submitted ? "提出" : "未公開";
+  const showNumber = revealed || own;
+  const numberAttrs = showNumber
+    ? { class: "card-number-chip graded", style: cardNumberStyle(card.number) }
+    : { class: "card-number-chip hidden-number" };
   return el(
     "article",
-    { class: `hint-card ${revealed ? "revealed" : ""} ${card.failed ? "failed" : ""}` },
+    { class: `hint-card ${revealed ? "revealed" : ""} ${card.failed ? "failed" : ""} ${own ? "own" : ""}` },
     el(
       "div",
       { class: "hint-card-head" },
       el("span", {}, player ? player.name : "不明"),
-      revealed || own ? el("strong", {}, String(card.number)) : el("strong", {}, "?")
+      el("strong", numberAttrs, showNumber ? String(card.number) : "?")
     ),
     el("p", {}, card.text || "未入力"),
     el("div", { class: "hint-card-foot" }, pill(status, card.failed || card.skipped ? "danger" : revealed ? "ok" : "muted"))
@@ -660,12 +758,12 @@ function renderHintCard(card, revealed) {
 function renderOwnSubmitCards() {
   const cards = getOwnActiveRoundCards().filter((card) => !card.revealed);
   if (!cards.length) {
-    return el("p", { class: "muted-text" }, "提出できる自分のカードはありません。");
+    return el("p", { class: "muted-text" }, "提出できる手札がありません");
   }
   return el(
     "div",
     { class: "own-submit" },
-    el("h3", {}, "自分のカード"),
+    el("h3", {}, "手札"),
     el(
       "div",
       { class: "submit-grid" },
@@ -673,31 +771,12 @@ function renderOwnSubmitCards() {
         el(
           "div",
           { class: "submit-card" },
-          el("strong", {}, String(card.number)),
+          el("strong", { class: "card-number-chip graded", style: cardNumberStyle(card.number) }, String(card.number)),
           el("span", {}, card.text),
           button("提出", () => submitCard(card.id), "primary")
         )
       )
     )
-  );
-}
-
-function renderSubmitLog() {
-  const round = appState.room.currentRound;
-  return el(
-    "div",
-    { class: "log-list" },
-    el("h3", {}, "提出履歴"),
-    ...round.submitLog.map((entry) => {
-      const player = getPlayer(entry.playerId);
-      const loss = entry.lifeLoss > 0 ? ` / ライフ -${entry.lifeLoss}` : "";
-      return el(
-        "div",
-        { class: `log-row ${entry.success ? "success" : "failure"}` },
-        el("span", {}, `${player ? player.name : "不明"}: ${entry.number}`),
-        el("span", {}, `${entry.success ? "成功" : `失敗 ${entry.skippedCards.length}枚飛ばし`}${loss}`)
-      );
-    })
   );
 }
 
@@ -710,7 +789,8 @@ function renderVote() {
   return el(
     "div",
     { class: "content-grid" },
-    panel("戦犯投票", [
+    panel("うっかり投票", [
+      themeHero(round.roundNumber, round.theme),
       el(
         "form",
         { class: "stack", onsubmit: handleVoteSubmit },
@@ -718,23 +798,23 @@ function renderVote() {
           "fieldset",
           {},
           el("legend", {}, "投票先"),
-          radio("target", "none", "戦犯なし", ownVote === null || ownVote === undefined, false),
+          radio("target", "none", "なし", ownVote === null || ownVote === undefined, false),
           ...appState.room.players.map((player) => radio("target", player.id, player.name, ownVote === player.id, false))
         ),
         button("投票", null, "primary", { type: "submit" })
       )
     ]),
     panel("投票状況", [
-      el("p", { class: "muted-text" }, `${votedCount}/${appState.room.players.length}`),
-      el("p", { class: "muted-text" }, allVoted ? "集計して結果へ進みます。" : "全員が投票すると自動で結果へ進みます。")
+      el("p", { class: "big-count" }, `${votedCount}/${appState.room.players.length}`),
+      el("p", { class: "muted-text microcopy" }, allVoted ? "投票完了" : "投票待ち")
     ])
   );
 }
 
 function renderRoundEnd() {
   const latest = getLatestLog();
-  return panel(`ラウンド ${latest.roundNumber} 終了`, [
-    renderRoundLogSummary(latest),
+  return panel("うっかり投票結果", [
+    renderVoteRanking(latest),
     isHost() ? button("次のラウンドへ", nextRound, "primary") : el("p", { class: "muted-text" }, "ホストの進行待ち")
   ]);
 }
@@ -742,19 +822,120 @@ function renderRoundEnd() {
 function renderGameOver() {
   const room = appState.room;
   const text = buildExportText(room);
-  return panel("ゲーム結果", [
-    el("textarea", { class: "export-text", readonly: true }, text),
-    el("div", { class: "action-row" }, button("結果をコピー", () => copyText(text), "primary"), isHost() ? button("ロビーへ戻す", resetToLobby, "secondary") : null)
+  return panel("最終結果", [
+    renderClearHistory(room),
+    renderFinalResults(room),
+    el(
+      "div",
+      { class: "action-row" },
+      button("結果をコピー", () => copyText(text), "primary"),
+      isHost() ? button("同じ設定でもう一度", playAgainSameSettings, "secondary") : null,
+      isHost() ? button("設定を変えてもう一度", resetToLobby, "secondary") : null
+    )
   ]);
 }
 
-function renderRoundLogSummary(log) {
+function renderFinalResults(room) {
+  if (!room.logs.length) {
+    return el("p", { class: "muted-text" }, "表示できる結果がありません");
+  }
+
+  return el(
+    "section",
+    { class: "final-results" },
+    ...room.logs.map((log) => renderFinalRound(log))
+  );
+}
+
+function renderFinalRound(log) {
+  const culpritPlayerId = log.voteResult && log.voteResult.playerId ? log.voteResult.playerId : null;
+  return el(
+    "article",
+    { class: "final-round" },
+    themeHero(log.roundNumber, log.theme),
+    el(
+      "div",
+      { class: "final-card-grid" },
+      ...[...log.cards]
+        .sort((a, b) => a.number - b.number)
+        .map((card) => renderFinalCard(card, culpritPlayerId))
+    )
+  );
+}
+
+function renderFinalCard(card, culpritPlayerId) {
+  const isCulprit = card.playerId === culpritPlayerId;
+  return el(
+    "article",
+    { class: `final-card ${card.skipped ? "skipped" : ""} ${card.failed ? "failed" : ""} ${isCulprit ? "culprit" : ""}` },
+    el(
+      "div",
+      { class: "final-card-head" },
+      el("strong", { class: "card-number-chip graded", style: cardNumberStyle(card.number) }, String(card.number)),
+      el(
+        "div",
+        { class: "final-card-meta" },
+        el("span", {}, card.playerName),
+        isCulprit ? pill("うっかりさん", "warn") : null
+      )
+    ),
+    el("p", {}, card.text || "未入力")
+  );
+}
+
+function renderClearHistory(room) {
+  const history = normalizeClearHistory(room.clearHistory);
+  const failureRounds = Object.keys(history.failures).map((round) => Number(round));
+  const maxRound = Math.max(room.settings.maxRounds, ...failureRounds, 1);
+
+  return el(
+    "section",
+    { class: "clear-history" },
+    el("h3", {}, "クリア履歴"),
+    el(
+      "div",
+      { class: "clear-history-grid" },
+      ...Array.from({ length: maxRound }, (_, index) => {
+        const round = index + 1;
+        return renderClearHistoryItem(`Round${round}で失敗`, history.failures[String(round)] || 0);
+      }),
+      renderClearHistoryItem("クリア", history.clears)
+    )
+  );
+}
+
+function renderClearHistoryItem(labelText, count) {
   return el(
     "div",
-    { class: "round-summary" },
-    el("p", {}, `テーマ: ${log.theme}`),
-    el("p", {}, `判定: ${log.life.lost > 0 ? `失敗あり / ライフ -${log.life.lost}` : "全成功"}`),
-    el("p", {}, `ライフ: ${log.life.before} → ${log.life.afterPenalty} → ${log.life.after}`)
+    { class: "clear-history-item" },
+    el("span", {}, labelText),
+    el("strong", {}, String(count))
+  );
+}
+
+function renderVoteRanking(log) {
+  if (!log || !log.voteResult) {
+    return el("p", { class: "muted-text" }, "このラウンドの投票はありません");
+  }
+
+  const ranking = getVoteRanking(log);
+  return el(
+    "div",
+    { class: "vote-ranking" },
+    themeHero(log.roundNumber, log.theme),
+    el(
+      "div",
+      { class: "vote-ranking-list" },
+      ...ranking.map((item, index) =>
+        el(
+          "div",
+          { class: `vote-ranking-row ${item.id === "none" ? "none-vote" : ""}` },
+          el("span", { class: "vote-rank" }, `${index + 1}`),
+          el("strong", {}, item.name),
+          el("span", { class: "vote-count" }, `${item.count}票`)
+        )
+      )
+    )
   );
 }
 
@@ -767,7 +948,7 @@ function renderFinalPlayers() {
         "div",
         { class: "player-row" },
         el("span", { class: "player-name" }, player.name),
-        el("span", { class: "player-meta" }, `戦犯 ${player.culpritTokens || 0}`)
+        el("span", { class: "player-meta" }, `うっかり票 ${player.culpritTokens || 0}`)
       )
     )
   );
@@ -787,6 +968,7 @@ async function createRoom() {
       life: DEFAULT_SETTINGS.initialLife,
       currentRound: null,
       logs: [],
+      clearHistory: { failures: {}, clears: 0 },
       endReason: null,
       createdAt: nowIso(),
       updatedAt: nowIso()
@@ -798,7 +980,6 @@ async function createRoom() {
     appState.playerId = null;
     appState.hostKey = key;
     await appState.store.create(room);
-    setNotice(appState.syncMode === "firebase" ? "ルームを作成しました。共有URLから参加できます。" : "確認用ルームを作成しました。同じ通常ブラウザの別タブから参加できます。");
   });
 }
 
@@ -817,7 +998,7 @@ async function handleNameSubmit(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const name = String(form.get("name") || "").trim();
-  if (!name) return setError("表示名を入力してください。");
+  if (!name) return setError("名前を入力してください。");
 
   await runAction(async () => {
     const playerId = crypto.randomUUID();
@@ -829,11 +1010,13 @@ async function handleNameSubmit(event) {
         culpritTokens: 0,
         joinedAt: nowIso()
       });
+      if (room.hostKey && appState.hostKey === room.hostKey && !room.hostPlayerId) {
+        room.hostPlayerId = playerId;
+      }
       return room;
     });
     appState.playerId = playerId;
     savePlayerId(appState.room.id, playerId);
-    setNotice(`${name}で参加しました。`);
   });
 }
 
@@ -886,9 +1069,8 @@ async function saveSettings(settings) {
       room.life = settings.initialLife;
       return room;
     });
-    setNotice("設定を更新しました。");
   } catch (error) {
-    setError(error.message || "設定の更新に失敗しました。");
+    setError(error.message || "ルールを更新できませんでした。");
     console.error(error);
   }
 }
@@ -903,7 +1085,7 @@ async function startGame() {
   await runAction(async () => {
     await appState.store.update((room) => {
       requireHost(room);
-      if (room.players.length < 1) throw new Error("参加者が必要です。");
+      if (room.players.length < 1) throw new Error("メンバーが必要です。");
       if (latestSettings) {
         room.settings = latestSettings;
       }
@@ -923,14 +1105,14 @@ async function handleThemeSubmit(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const theme = String(form.get("theme") || "").trim();
-  if (!theme) return setError("テーマを入力してください。");
+  if (!theme) return setError("お題を入力してください。");
 
   await runAction(async () => {
     await appState.store.update((room) => {
       requireHost(room);
       const nextRound = room.round + 1;
       const cardsPerPlayer = getCardsPerPlayer(room, nextRound);
-      if (cardsPerPlayer < 1) throw new Error("カードを配布できません。参加者数と上限を確認してください。");
+      if (cardsPerPlayer < 1) throw new Error("カードを配れません。メンバー数と手札上限を確認してください。");
       const cards = dealCards(room.players, cardsPerPlayer, nextRound);
       room.currentRound = {
         roundNumber: nextRound,
@@ -967,7 +1149,6 @@ async function handleTextSubmit(event) {
       }
       return room;
     });
-    setNotice("入力を保存しました。");
   });
 }
 
@@ -1080,7 +1261,6 @@ async function handleVoteSubmit(event) {
       }
       return room;
     });
-    setNotice("投票しました。");
   });
 }
 
@@ -1091,7 +1271,7 @@ async function closeVote() {
       requirePhase(room, "vote");
       const round = room.currentRound;
       if (Object.keys(round.votes || {}).length < room.players.length) {
-        throw new Error("未投票の参加者がいます。");
+        throw new Error("未投票のメンバーがいます。");
       }
       finalizeVote(room);
       return room;
@@ -1127,15 +1307,30 @@ async function resetToLobby() {
   await runAction(async () => {
     await appState.store.update((room) => {
       requireHost(room);
-      room.phase = "lobby";
-      room.round = 0;
-      room.life = room.settings.initialLife;
-      room.currentRound = null;
-      room.logs = [];
-      room.endReason = null;
+      resetGameState(room, "lobby");
       return room;
     });
   });
+}
+
+async function playAgainSameSettings() {
+  await runAction(async () => {
+    await appState.store.update((room) => {
+      requireHost(room);
+      resetGameState(room, "theme");
+      return room;
+    });
+  });
+}
+
+function resetGameState(room, phase) {
+  room.phase = phase;
+  room.round = 0;
+  room.life = room.settings.initialLife;
+  room.currentRound = null;
+  room.logs = [];
+  room.endReason = null;
+  room.players = room.players.map((player) => ({ ...player, culpritTokens: 0 }));
 }
 
 function completeRound(room) {
@@ -1155,18 +1350,43 @@ function completeRound(room) {
   room.currentRound = null;
 
   if (afterPenalty <= 0) {
+    recordClearHistory(room, "failure", round.roundNumber);
     room.phase = "gameOver";
     room.endReason = "life";
     return;
   }
 
   if (room.round >= room.settings.maxRounds) {
+    recordClearHistory(room, "clear", round.roundNumber);
     room.phase = "gameOver";
     room.endReason = "rounds";
     return;
   }
 
-  room.phase = "roundEnd";
+  room.phase = log.voteResult ? "roundEnd" : "theme";
+}
+
+function recordClearHistory(room, result, roundNumber) {
+  room.clearHistory = normalizeClearHistory(room.clearHistory);
+  if (result === "clear") {
+    room.clearHistory.clears += 1;
+    return;
+  }
+  const key = String(roundNumber);
+  room.clearHistory.failures[key] = (room.clearHistory.failures[key] || 0) + 1;
+}
+
+function normalizeClearHistory(history) {
+  const failures = {};
+  const rawFailures = history && typeof history.failures === "object" ? history.failures : {};
+  for (const [round, count] of Object.entries(rawFailures)) {
+    const normalizedCount = Number(count || 0);
+    if (normalizedCount > 0) failures[String(round)] = normalizedCount;
+  }
+  return {
+    failures,
+    clears: Number(history && history.clears ? history.clears : 0)
+  };
 }
 
 function buildRoundLog(room, round, afterPenalty, bonus) {
@@ -1197,7 +1417,7 @@ function buildRoundLog(room, round, afterPenalty, bonus) {
       playerId,
       playerName: getPlayerName(room, playerId),
       targetId,
-      targetName: targetId ? getPlayerName(room, targetId) : "戦犯なし"
+      targetName: targetId ? getPlayerName(room, targetId) : "なし"
     })),
     completedAt: nowIso()
   };
@@ -1215,7 +1435,7 @@ function tallyVotes(room, votes) {
   const max = Math.max(...Object.values(counts));
   const winners = Object.entries(counts).filter(([, count]) => count === max);
   if (winners.length !== 1 || winners[0][0] === "none") {
-    return { playerId: null, playerName: "戦犯なし", counts };
+    return { playerId: null, playerName: "なし", counts };
   }
 
   const playerId = winners[0][0];
@@ -1227,10 +1447,10 @@ function buildExportText(room) {
 
   for (const [index, log] of room.logs.entries()) {
     if (index > 0) lines.push("");
-    lines.push(`--- テーマ：${log.theme} ---`);
+    lines.push(`--- お題：${log.theme} ---`);
     const culpritPlayerId = log.voteResult && log.voteResult.playerId ? log.voteResult.playerId : null;
     for (const card of [...log.cards].sort((a, b) => a.number - b.number)) {
-      const culpritMark = card.playerId === culpritPlayerId ? " ★戦犯" : "";
+      const culpritMark = card.playerId === culpritPlayerId ? " ★うっかりさん" : "";
       lines.push(`${card.playerName}：${card.text} (${card.number})${culpritMark}`);
     }
   }
@@ -1243,6 +1463,7 @@ function normalizeRoom(room) {
   return {
     id: room.id,
     hostKey: room.hostKey || "",
+    hostPlayerId: room.hostPlayerId || null,
     phase: room.phase || "lobby",
     settings,
     players: Array.isArray(room.players) ? room.players : [],
@@ -1250,6 +1471,7 @@ function normalizeRoom(room) {
     life: Number(room.life ?? settings.initialLife),
     currentRound: room.currentRound || null,
     logs: Array.isArray(room.logs) ? room.logs : [],
+    clearHistory: normalizeClearHistory(room.clearHistory),
     endReason: room.endReason || null,
     createdAt: room.createdAt || nowIso(),
     updatedAt: room.updatedAt || nowIso()
@@ -1261,18 +1483,19 @@ function dealCards(players, count, roundNumber) {
   let cursor = 0;
   const cards = [];
   for (const player of players) {
-    for (let index = 0; index < count; index += 1) {
+    const playerNumbers = numbers.slice(cursor, cursor + count).sort((a, b) => a - b);
+    cursor += count;
+    for (let index = 0; index < playerNumbers.length; index += 1) {
       cards.push({
-        id: `r${roundNumber}-${player.id}-${index}-${numbers[cursor]}`,
+        id: `r${roundNumber}-${player.id}-${index}-${playerNumbers[index]}`,
         playerId: player.id,
-        number: numbers[cursor],
+        number: playerNumbers[index],
         text: "",
         revealed: false,
         submitted: false,
         skipped: false,
         failed: false
       });
-      cursor += 1;
     }
   }
   return cards;
@@ -1319,12 +1542,46 @@ function getLatestLog() {
   return appState.room.logs[appState.room.logs.length - 1];
 }
 
+function getVoteRanking(log) {
+  const counts = log.voteResult.counts || {};
+  const ranking = appState.room.players.map((player) => ({
+    id: player.id,
+    name: player.name,
+    count: counts[player.id] || 0
+  }));
+  if (counts.none > 0) {
+    ranking.push({ id: "none", name: "なし", count: counts.none });
+  }
+  return ranking.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "ja"));
+}
+
+function cardNumberStyle(number) {
+  const ratio = Math.max(0, Math.min(1, (Number(number) - 1) / 99));
+  const skySaturation = 34 + ratio * 48;
+  const mintSaturation = 34 + ratio * 40;
+  const skyLightness = 99 - ratio * 52;
+  const mintLightness = 98 - ratio * 58;
+  const ringLightness = 91 - ratio * 54;
+  const color = ratio > 0.66 ? "#ffffff" : "#2c6775";
+  return [
+    `--number-bg: linear-gradient(145deg, hsl(190 ${skySaturation}% ${skyLightness}%), hsl(96 ${mintSaturation}% ${mintLightness}%))`,
+    `--number-fg: ${color}`,
+    `--number-ring: hsl(178 48% ${ringLightness}%)`
+  ].join("; ");
+}
+
 function isHost() {
   return Boolean(appState.room && appState.hostKey && appState.room.hostKey === appState.hostKey);
 }
 
+function isPlayerHost(room, playerId) {
+  return room.hostPlayerId
+    ? room.hostPlayerId === playerId
+    : isHost() && appState.playerId === playerId;
+}
+
 function requireHost(room) {
-  if (!appState.hostKey || room.hostKey !== appState.hostKey) throw new Error("ホスト操作です。");
+  if (!appState.hostKey || room.hostKey !== appState.hostKey) throw new Error("ホストだけ操作できます。");
 }
 
 function requirePhase(room, phase) {
@@ -1334,7 +1591,7 @@ function requirePhase(room, phase) {
 function assertUniquePlayerName(room, name) {
   const normalized = normalizeName(name);
   const exists = room.players.some((player) => normalizeName(player.name) === normalized);
-  if (exists) throw new Error("同じ名前の参加者がいます。");
+  if (exists) throw new Error("同じ名前のメンバーがいます。");
 }
 
 function normalizeName(name) {
@@ -1342,15 +1599,15 @@ function normalizeName(name) {
 }
 
 function sortModeLabel(value) {
-  return value === "pattern2" ? "全カード一括判定" : "1枚ずつ提出";
+  return value === "pattern2" ? "全カード一括" : "1枚ずつ";
 }
 
 function pattern1LifeRuleLabel(value) {
-  return value === "skipped" ? "飛ばした枚数分" : "飛ばし時 -1";
+  return value === "skipped" ? "飛ばした枚数分" : "一律 -1";
 }
 
 function inputVisibilityLabel(value) {
-  return value === "live" ? "随時公開" : "全員入力後";
+  return value === "live" ? "入力中も表示" : "全員入力後";
 }
 
 async function runAction(action) {
@@ -1418,7 +1675,6 @@ function getShareUrl(roomId) {
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    setNotice("コピーしました。");
   } catch {
     setError("コピーできませんでした。");
   }
@@ -1539,6 +1795,8 @@ function button(text, onClick, tone = "secondary", attrs = {}) {
       type: attrs.type || "button",
       class: `button ${tone}`,
       disabled: attrs.disabled || appState.loading,
+      title: attrs.title || null,
+      "aria-label": attrs.ariaLabel || null,
       onclick: onClick || null
     },
     text
@@ -1550,11 +1808,15 @@ function pill(text, tone = "muted") {
 }
 
 function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
+  const isSvg = tag === "svg" || tag === "path";
+  const node = isSvg
+    ? document.createElementNS("http://www.w3.org/2000/svg", tag)
+    : document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
     if (value === null || value === undefined || value === false) continue;
     if (key === "class" || key === "className") {
-      node.className = value;
+      if (isSvg) node.setAttribute("class", value);
+      else node.className = value;
     } else if (key === "for") {
       node.htmlFor = value;
     } else if (key === "readonly") {
