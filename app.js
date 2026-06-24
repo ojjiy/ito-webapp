@@ -1,5 +1,6 @@
 const FIREBASE_APP_URL = "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 const FIREBASE_STORE_URL = "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+const FIREBASE_APP_CHECK_URL = "https://www.gstatic.com/firebasejs/10.12.5/firebase-app-check.js";
 
 const PHASE_LABELS = {
   lobby: "ロビー",
@@ -68,6 +69,15 @@ class RoomStore {
         import(FIREBASE_STORE_URL)
       ]);
       const firebaseApp = initializeApp(config);
+
+      if (config.appCheckSiteKey) {
+        const { initializeAppCheck, ReCaptchaEnterpriseProvider } = await import(FIREBASE_APP_CHECK_URL);
+        initializeAppCheck(firebaseApp, {
+          provider: new ReCaptchaEnterpriseProvider(config.appCheckSiteKey),
+          isTokenAutoRefreshEnabled: true
+        });
+      }
+
       this.db = firestore.getFirestore(firebaseApp);
       this.fs = firestore;
       this.setMode("firebase");
@@ -248,12 +258,13 @@ function appShell(content) {
           : pill(roomText, "muted"),
         pill(phase, "info"),
         room ? button("URL", () => copyText(shareUrl), "secondary compact") : null,
-        room ? button("退出", leaveRoomUrl, "ghost compact") : null
+        room ? button("退出", leaveCurrentRoom, "ghost compact") : null
       )
     ),
     appState.error ? el("div", { class: "banner error" }, appState.error) : null,
     appState.notice ? el("div", { class: "banner notice" }, appState.notice) : null,
     localShareWarning ? el("div", { class: "banner warning" }, localShareWarning) : null,
+    room && room.roomMessage ? el("div", { class: "banner notice" }, room.roomMessage) : null,
     content
   );
 }
@@ -275,18 +286,31 @@ function renderEntry() {
 
   return el(
     "main",
-    { class: "layout split" },
-    panel("ルームを作る", [
-      button("作成", createRoom, "primary")
-    ]),
-    panel("ルームに入る", [
+    { class: "layout home-layout" },
+    el(
+      "div",
+      { class: "home-actions" },
+      el(
+        "article",
+        { class: "home-tile home-create-tile" },
+        el(
+          "div",
+          { class: "home-create-box" },
+          button("部屋を作る", createRoom, "primary calm-blue")
+        )
+      ),
       el(
         "form",
-        { class: "stack", onsubmit: handleRoomJoin },
-        label("ルームID", el("input", { name: "roomId", maxlength: "12", autocomplete: "off", required: true })),
-        button("参加", null, "primary", { type: "submit" })
+        { class: "home-tile home-enter-tile", onsubmit: handleRoomJoin },
+        el(
+          "div",
+          { class: "home-join-box" },
+          el("label", { class: "sr-only", for: "home-room-id" }, "ルームID"),
+          el("input", { id: "home-room-id", name: "roomId", maxlength: "12", autocomplete: "off", placeholder: "ルームID", required: true }),
+          button("部屋に入る", null, "primary", { type: "submit" })
+        )
       )
-    ])
+    )
   );
 }
 
@@ -406,19 +430,26 @@ function renderSidePanel() {
       el(
         "div",
         { class: "side-player-list" },
-        ...room.players.map((item) =>
-          el(
+        ...room.players.map((item) => {
+          const isSpectator = room.currentRound && !isRoundParticipant(room, room.currentRound, item.id);
+          return el(
             "div",
             { class: "side-player" },
             el(
               "div",
               { class: "side-player-head" },
               el("span", {}, item.name),
-              isPlayerHost(room, item.id) ? pill("ホスト", "ok") : null
+              el(
+                "div",
+                { class: "side-player-actions" },
+                isPlayerHost(room, item.id) ? pill("ホスト", "ok") : null,
+                isSpectator ? pill("閲覧", "muted") : null,
+                canRemovePlayer(item.id) ? button("削除", () => removePlayer(item.id), "ghost compact", { title: `${item.name}を削除` }) : null
+              )
             ),
             el("small", {}, `うっかり票 ${item.culpritTokens || 0}`)
-          )
-        )
+          );
+        })
       )
     ),
     isLobby
@@ -539,7 +570,8 @@ function renderPlayerList(extraClass = "") {
           "div",
           { class: "player-row-meta" },
           isPlayerHost(room, player.id) ? pill("ホスト", "ok") : null,
-          el("span", { class: "player-meta" }, `うっかり票 ${player.culpritTokens || 0}`)
+          el("span", { class: "player-meta" }, `うっかり票 ${player.culpritTokens || 0}`),
+          canRemovePlayer(player.id) ? button("削除", () => removePlayer(player.id), "ghost compact", { title: `${player.name}を削除` }) : null
         )
       )
     )
@@ -565,6 +597,7 @@ function renderWriting() {
   const ownCards = getOwnActiveRoundCards();
   const ownReady = ownCards.length > 0 && ownCards.every((card) => card.text.trim().length > 0);
   const allReady = round.cards.every((card) => card.text.trim().length > 0);
+  const isParticipant = isRoundParticipant(appState.room, round, appState.playerId);
 
   return el(
     "div",
@@ -589,7 +622,7 @@ function renderWriting() {
         ),
         ownCards.length
           ? button(ownReady ? "記入済み" : "保存", null, "primary", { type: "submit", disabled: ownReady })
-          : el("p", { class: "muted-text" }, "手札がありません")
+          : el("p", { class: "muted-text" }, isParticipant ? "手札がありません" : "このラウンドは閲覧のみです")
       )
     ]),
     panel("入力状況", [
@@ -601,10 +634,11 @@ function renderWriting() {
 
 function renderInputProgress() {
   const round = appState.room.currentRound;
+  const players = getRoundPlayers(appState.room, round);
   return el(
     "div",
     { class: "player-list" },
-    ...appState.room.players.map((player) => {
+    ...players.map((player) => {
       const cards = round.cards.filter((card) => card.playerId === player.id);
       const ready = cards.length > 0 && cards.every((card) => card.text.trim().length > 0);
       return el(
@@ -719,6 +753,7 @@ function renderSubmissionTrack(round) {
 
 function renderSubmissionTrackCard(card) {
   const player = getPlayer(card.playerId);
+  const statusText = card.skipped ? "パスされたカード" : card.failed ? "飛ばして配置してしまったカード" : "成功";
   const className = [
     "submission-track-card",
     card.skipped ? "skipped" : card.failed ? "failed-submission" : "success"
@@ -726,8 +761,8 @@ function renderSubmissionTrackCard(card) {
 
   return el(
     "article",
-    { class: className },
-    el("strong", {}, String(card.number)),
+    { class: className, style: cardNumberStyle(card.number), "aria-label": `${card.number}: ${statusText}` },
+    el("strong", { class: "card-number-chip graded" }, String(card.number)),
     el("span", {}, card.text || "未入力"),
     el("small", {}, player ? player.name : "不明")
   );
@@ -781,9 +816,13 @@ function renderOwnSubmitCards() {
 }
 
 function renderVote() {
-  const round = appState.room.currentRound;
-  const votedCount = Object.keys(round.votes || {}).length;
-  const allVoted = votedCount >= appState.room.players.length;
+  const room = appState.room;
+  const round = room.currentRound;
+  const roundPlayers = getRoundPlayers(room, round);
+  const roundPlayerIds = getRoundPlayerIds(room, round);
+  const isParticipant = isRoundParticipant(room, round, appState.playerId);
+  const votedCount = countRoundVotes(round, roundPlayerIds);
+  const allVoted = votedCount >= roundPlayerIds.length;
   const ownVote = round.votes ? round.votes[appState.playerId] : undefined;
 
   return el(
@@ -791,21 +830,23 @@ function renderVote() {
     { class: "content-grid" },
     panel("うっかり投票", [
       themeHero(round.roundNumber, round.theme),
-      el(
-        "form",
-        { class: "stack", onsubmit: handleVoteSubmit },
-        el(
-          "fieldset",
-          {},
-          el("legend", {}, "投票先"),
-          radio("target", "none", "なし", ownVote === null || ownVote === undefined, false),
-          ...appState.room.players.map((player) => radio("target", player.id, player.name, ownVote === player.id, false))
-        ),
-        button("投票", null, "primary", { type: "submit" })
-      )
+      isParticipant
+        ? el(
+            "form",
+            { class: "stack", onsubmit: handleVoteSubmit },
+            el(
+              "fieldset",
+              {},
+              el("legend", {}, "投票先"),
+              radio("target", "none", "なし", ownVote === null || ownVote === undefined, false),
+              ...roundPlayers.map((player) => radio("target", player.id, player.name, ownVote === player.id, false))
+            ),
+            button("投票", null, "primary", { type: "submit" })
+          )
+        : el("p", { class: "muted-text" }, "このラウンドは閲覧のみです")
     ]),
     panel("投票状況", [
-      el("p", { class: "big-count" }, `${votedCount}/${appState.room.players.length}`),
+      el("p", { class: "big-count" }, `${votedCount}/${roundPlayerIds.length}`),
       el("p", { class: "muted-text microcopy" }, allVoted ? "投票完了" : "投票待ち")
     ])
   );
@@ -865,13 +906,18 @@ function renderFinalRound(log) {
 
 function renderFinalCard(card, culpritPlayerId) {
   const isCulprit = card.playerId === culpritPlayerId;
+  const statusText = card.skipped ? "パスされたカード" : card.failed ? "飛ばして配置してしまったカード" : "成功";
   return el(
     "article",
-    { class: `final-card ${card.skipped ? "skipped" : ""} ${card.failed ? "failed" : ""} ${isCulprit ? "culprit" : ""}` },
+    {
+      class: `final-card ${card.skipped ? "skipped" : ""} ${card.failed ? "failed" : ""} ${isCulprit ? "culprit" : ""}`,
+      style: cardNumberStyle(card.number),
+      "aria-label": `${card.number}: ${statusText}`
+    },
     el(
       "div",
       { class: "final-card-head" },
-      el("strong", { class: "card-number-chip graded", style: cardNumberStyle(card.number) }, String(card.number)),
+      el("strong", { class: "card-number-chip graded" }, String(card.number)),
       el(
         "div",
         { class: "final-card-meta" },
@@ -970,6 +1016,7 @@ async function createRoom() {
       logs: [],
       clearHistory: { failures: {}, clears: 0 },
       endReason: null,
+      roomMessage: null,
       createdAt: nowIso(),
       updatedAt: nowIso()
     });
@@ -1013,6 +1060,7 @@ async function handleNameSubmit(event) {
       if (room.hostKey && appState.hostKey === room.hostKey && !room.hostPlayerId) {
         room.hostPlayerId = playerId;
       }
+      assignHostIfNeeded(room);
       return room;
     });
     appState.playerId = playerId;
@@ -1095,6 +1143,7 @@ async function startGame() {
       room.currentRound = null;
       room.logs = [];
       room.endReason = null;
+      room.roomMessage = null;
       room.players = room.players.map((player) => ({ ...player, culpritTokens: 0 }));
       return room;
     });
@@ -1117,6 +1166,7 @@ async function handleThemeSubmit(event) {
       room.currentRound = {
         roundNumber: nextRound,
         theme,
+        playerIds: room.players.map((player) => player.id),
         cards,
         submitLog: [],
         votes: {},
@@ -1139,6 +1189,7 @@ async function handleTextSubmit(event) {
     await appState.store.update((room) => {
       requirePhase(room, "writing");
       const round = room.currentRound;
+      if (!isRoundParticipant(room, round, appState.playerId)) return room;
       round.cards = round.cards.map((card) => {
         if (card.playerId !== appState.playerId) return card;
         const text = String(form.get(card.id) || "").trim();
@@ -1253,10 +1304,14 @@ async function handleVoteSubmit(event) {
     await appState.store.update((room) => {
       requirePhase(room, "vote");
       const round = room.currentRound;
-      const validTargets = new Set(room.players.map((player) => player.id));
+      const roundPlayerIds = getRoundPlayerIds(room, round);
+      if (!isRoundParticipant(room, round, appState.playerId)) {
+        throw new Error("このラウンドでは投票できません。");
+      }
+      const validTargets = new Set(roundPlayerIds);
       round.votes = round.votes || {};
       round.votes[appState.playerId] = target === "none" ? null : validTargets.has(target) ? target : null;
-      if (Object.keys(round.votes).length >= room.players.length) {
+      if (countRoundVotes(round, roundPlayerIds) >= roundPlayerIds.length) {
         finalizeVote(room);
       }
       return room;
@@ -1270,7 +1325,8 @@ async function closeVote() {
       requireHost(room);
       requirePhase(room, "vote");
       const round = room.currentRound;
-      if (Object.keys(round.votes || {}).length < room.players.length) {
+      const roundPlayerIds = getRoundPlayerIds(room, round);
+      if (countRoundVotes(round, roundPlayerIds) < roundPlayerIds.length) {
         throw new Error("未投票のメンバーがいます。");
       }
       finalizeVote(room);
@@ -1281,7 +1337,7 @@ async function closeVote() {
 
 function finalizeVote(room) {
   const round = room.currentRound;
-  const result = tallyVotes(room, round.votes || {});
+  const result = tallyVotes(room, round.votes || {}, getRoundPlayerIds(room, round));
   round.voteResult = result;
   if (result.playerId) {
     room.players = room.players.map((player) =>
@@ -1330,6 +1386,7 @@ function resetGameState(room, phase) {
   room.currentRound = null;
   room.logs = [];
   room.endReason = null;
+  room.roomMessage = null;
   room.players = room.players.map((player) => ({ ...player, culpritTokens: 0 }));
 }
 
@@ -1393,6 +1450,7 @@ function buildRoundLog(room, round, afterPenalty, bonus) {
   return {
     roundNumber: round.roundNumber,
     theme: round.theme,
+    playerIds: getRoundPlayerIds(room, round),
     cards: round.cards.map((card) => ({
       id: card.id,
       playerId: card.playerId,
@@ -1413,21 +1471,26 @@ function buildRoundLog(room, round, afterPenalty, bonus) {
       after: afterPenalty + bonus
     },
     voteResult: round.voteResult,
-    votes: Object.entries(round.votes || {}).map(([playerId, targetId]) => ({
-      playerId,
-      playerName: getPlayerName(room, playerId),
-      targetId,
-      targetName: targetId ? getPlayerName(room, targetId) : "なし"
-    })),
+    votes: Object.entries(round.votes || {})
+      .filter(([playerId]) => getRoundPlayerIds(room, round).includes(playerId))
+      .map(([playerId, targetId]) => ({
+        playerId,
+        playerName: getPlayerName(room, playerId),
+        targetId,
+        targetName: targetId ? getPlayerName(room, targetId) : "なし"
+      })),
     completedAt: nowIso()
   };
 }
 
-function tallyVotes(room, votes) {
+function tallyVotes(room, votes, playerIds = null) {
+  const eligiblePlayerIds = playerIds || room.players.map((player) => player.id);
+  const eligibleVoters = new Set(eligiblePlayerIds);
   const counts = { none: 0 };
-  for (const player of room.players) counts[player.id] = 0;
+  for (const playerId of eligiblePlayerIds) counts[playerId] = 0;
 
-  for (const targetId of Object.values(votes)) {
+  for (const [voterId, targetId] of Object.entries(votes)) {
+    if (!eligibleVoters.has(voterId)) continue;
     if (targetId && counts[targetId] !== undefined) counts[targetId] += 1;
     else counts.none += 1;
   }
@@ -1460,19 +1523,27 @@ function buildExportText(room) {
 
 function normalizeRoom(room) {
   const settings = { ...DEFAULT_SETTINGS, ...(room.settings || {}) };
+  const players = Array.isArray(room.players) ? room.players : [];
+  const hostPlayerId =
+    room.hostPlayerId && players.some((player) => player.id === room.hostPlayerId)
+      ? room.hostPlayerId
+      : players.length
+        ? players[0].id
+        : null;
   return {
     id: room.id,
     hostKey: room.hostKey || "",
-    hostPlayerId: room.hostPlayerId || null,
+    hostPlayerId,
     phase: room.phase || "lobby",
     settings,
-    players: Array.isArray(room.players) ? room.players : [],
+    players,
     round: Number(room.round || 0),
     life: Number(room.life ?? settings.initialLife),
     currentRound: room.currentRound || null,
     logs: Array.isArray(room.logs) ? room.logs : [],
     clearHistory: normalizeClearHistory(room.clearHistory),
     endReason: room.endReason || null,
+    roomMessage: room.roomMessage || null,
     createdAt: room.createdAt || nowIso(),
     updatedAt: room.updatedAt || nowIso()
   };
@@ -1532,6 +1603,31 @@ function getPlayerName(room, playerId) {
   return player ? player.name : "不明";
 }
 
+function getRoundPlayerIds(room, round) {
+  if (!round) return [];
+  const ids = Array.isArray(round.playerIds) && round.playerIds.length
+    ? round.playerIds
+    : round.cards.map((card) => card.playerId);
+  return [...new Set(ids)].filter((playerId) => room.players.some((player) => player.id === playerId));
+}
+
+function getRoundPlayers(room, round) {
+  const playersById = new Map(room.players.map((player) => [player.id, player]));
+  return getRoundPlayerIds(room, round)
+    .map((playerId) => playersById.get(playerId))
+    .filter(Boolean);
+}
+
+function isRoundParticipant(room, round, playerId) {
+  if (!playerId) return false;
+  return getRoundPlayerIds(room, round).includes(playerId);
+}
+
+function countRoundVotes(round, playerIds) {
+  const eligibleVoters = new Set(playerIds);
+  return Object.keys(round.votes || {}).filter((playerId) => eligibleVoters.has(playerId)).length;
+}
+
 function getOwnActiveRoundCards() {
   const round = appState.room.currentRound;
   if (!round) return [];
@@ -1544,10 +1640,14 @@ function getLatestLog() {
 
 function getVoteRanking(log) {
   const counts = log.voteResult.counts || {};
-  const ranking = appState.room.players.map((player) => ({
-    id: player.id,
-    name: player.name,
-    count: counts[player.id] || 0
+  const playersById = new Map();
+  for (const card of log.cards || []) {
+    if (!playersById.has(card.playerId)) playersById.set(card.playerId, card.playerName || "不明");
+  }
+  const ranking = [...playersById.entries()].map(([playerId, playerName]) => ({
+    id: playerId,
+    name: playerName,
+    count: counts[playerId] || 0
   }));
   if (counts.none > 0) {
     ranking.push({ id: "none", name: "なし", count: counts.none });
@@ -1571,7 +1671,7 @@ function cardNumberStyle(number) {
 }
 
 function isHost() {
-  return Boolean(appState.room && appState.hostKey && appState.room.hostKey === appState.hostKey);
+  return Boolean(appState.room && isCurrentUserHostFor(appState.room));
 }
 
 function isPlayerHost(room, playerId) {
@@ -1581,7 +1681,58 @@ function isPlayerHost(room, playerId) {
 }
 
 function requireHost(room) {
-  if (!appState.hostKey || room.hostKey !== appState.hostKey) throw new Error("ホストだけ操作できます。");
+  if (!isCurrentUserHostFor(room)) throw new Error("ホストだけ操作できます。");
+}
+
+function isCurrentUserHostFor(room) {
+  if (!room) return false;
+  if (room.hostPlayerId) return room.hostPlayerId === appState.playerId;
+  return Boolean(appState.hostKey && room.hostKey === appState.hostKey);
+}
+
+function canRemovePlayer(playerId) {
+  return isHost() && playerId !== appState.playerId;
+}
+
+function assignHostIfNeeded(room) {
+  if (!room.players.length) {
+    room.hostPlayerId = null;
+    return;
+  }
+  if (!room.hostPlayerId || !room.players.some((player) => player.id === room.hostPlayerId)) {
+    room.hostPlayerId = room.players[0].id;
+  }
+}
+
+function isGameInProgress(room) {
+  return !["lobby", "gameOver"].includes(room.phase);
+}
+
+function abortGameToLobby(room, message) {
+  room.phase = "lobby";
+  room.round = 0;
+  room.life = room.settings.initialLife;
+  room.currentRound = null;
+  room.logs = [];
+  room.endReason = null;
+  room.roomMessage = message;
+  room.players = room.players.map((player) => ({ ...player, culpritTokens: 0 }));
+}
+
+function removePlayerFromRoom(room, playerId, { self = false } = {}) {
+  const player = room.players.find((item) => item.id === playerId);
+  if (!player) return;
+
+  room.players = room.players.filter((item) => item.id !== playerId);
+  if (room.currentRound && room.currentRound.votes) {
+    delete room.currentRound.votes[playerId];
+  }
+  assignHostIfNeeded(room);
+
+  if (isGameInProgress(room)) {
+    const action = self ? "退出した" : "削除された";
+    abortGameToLobby(room, `${player.name}が${action}ため、進行中のゲームを破棄しました。`);
+  }
 }
 
 function requirePhase(room, phase) {
@@ -1666,6 +1817,56 @@ function leaveRoomUrl() {
   render();
 }
 
+async function leaveCurrentRoom() {
+  if (appState.loading) return;
+  const roomId = appState.roomId || (appState.room && appState.room.id);
+  const playerId = appState.playerId;
+  const wasHost = appState.room ? isCurrentUserHostFor(appState.room) : false;
+
+  if (!appState.room || !playerId) {
+    if (roomId) {
+      clearPlayerId(roomId);
+      clearHostKey(roomId);
+    }
+    leaveRoomUrl();
+    return;
+  }
+
+  appState.loading = true;
+  clearMessages();
+  render();
+  try {
+    await appState.store.update((room) => {
+      removePlayerFromRoom(room, playerId, { self: true });
+      return room;
+    });
+    clearPlayerId(roomId);
+    if (wasHost) clearHostKey(roomId);
+    leaveRoomUrl();
+  } catch (error) {
+    setError(error.message || "退出できませんでした。");
+    console.error(error);
+  } finally {
+    appState.loading = false;
+    render();
+  }
+}
+
+async function removePlayer(playerId) {
+  if (playerId === appState.playerId) {
+    await leaveCurrentRoom();
+    return;
+  }
+
+  await runAction(async () => {
+    await appState.store.update((room) => {
+      requireHost(room);
+      removePlayerFromRoom(room, playerId);
+      return room;
+    });
+  });
+}
+
 function getShareUrl(roomId) {
   const url = new URL(window.location.href);
   url.searchParams.set("room", roomId);
@@ -1737,6 +1938,10 @@ function saveHostKey(roomId, key) {
 
 function clearPlayerId(roomId) {
   clientStorage().removeItem(playerKey(roomId));
+}
+
+function clearHostKey(roomId) {
+  clientStorage().removeItem(hostKey(roomId));
 }
 
 function readLocalRoom(roomId) {
