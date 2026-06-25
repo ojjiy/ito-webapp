@@ -62,18 +62,19 @@ class RoomStore {
       this.setMode("local");
       return;
     }
+    const { appCheckSiteKey, ...firebaseConfig } = config;
 
     try {
-      const [{ initializeApp }, firestore] = await Promise.all([
+      const [{ initializeApp }, firestore, appCheck] = await Promise.all([
         import(FIREBASE_APP_URL),
-        import(FIREBASE_STORE_URL)
+        import(FIREBASE_STORE_URL),
+        import(FIREBASE_APP_CHECK_URL)
       ]);
-      const firebaseApp = initializeApp(config);
+      const firebaseApp = initializeApp(firebaseConfig);
 
-      if (config.appCheckSiteKey) {
-        const { initializeAppCheck, ReCaptchaEnterpriseProvider } = await import(FIREBASE_APP_CHECK_URL);
-        initializeAppCheck(firebaseApp, {
-          provider: new ReCaptchaEnterpriseProvider(config.appCheckSiteKey),
+      if (appCheckSiteKey) {
+        appCheck.initializeAppCheck(firebaseApp, {
+          provider: new appCheck.ReCaptchaEnterpriseProvider(appCheckSiteKey),
           isTokenAutoRefreshEnabled: true
         });
       }

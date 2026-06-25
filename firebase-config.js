@@ -8,7 +8,7 @@ window.ITO_FIREBASE_CONFIG = {
   messagingSenderId: "196498855937",
   appId: "1:196498855937:web:c17c6d27c6c8a9e4c20800",
   measurementId: "G-FK6RF1Y2CR",
-  appCheckSiteKey: "6LfAJjItAAAAAH5SbJWEj7BUgCKlA-ybuy9krgNf"
+  appCheckSiteKey: "6LfHUDQtAAAAAHeW8eqwEPIsrnnW2oLnjZdJ6Q_N"
 };
 
 // Firebaseを使う場合は、このファイルの値をFirebase Web App設定で置き換える。
