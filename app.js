@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS = {
   cardLimit: 5,
   sortMode: "pattern1",
   pattern1LifeRule: "flat",
-  pattern2LifeRule: "flat",
+  pattern2LifeRule: "skipped",
   culpritTokens: true,
   inputVisibility: "afterWriting"
 };
@@ -45,6 +45,7 @@ const appState = {
   autoHostClaimInFlight: false,
   notice: "",
   error: "",
+  nameDraft: "",
   textDrafts: {}
 };
 
@@ -410,7 +411,17 @@ function renderNameRegistration() {
       el(
         "form",
         { class: "stack", onsubmit: handleNameSubmit },
-        label("名前", el("input", { name: "name", maxlength: "24", autocomplete: "name", required: true })),
+        label(
+          "名前",
+          el("input", {
+            name: "name",
+            maxlength: "24",
+            autocomplete: "name",
+            value: appState.nameDraft,
+            oninput: handleNameDraftInput,
+            required: true
+          })
+        ),
         button("参加", null, "primary", { type: "submit" })
       )
     ])
@@ -560,6 +571,8 @@ function renderLobby() {
 function renderSettingsForm() {
   const settings = appState.room.settings;
   const disabled = !isHost();
+  const isPattern1 = settings.sortMode !== "pattern2";
+  const isPattern2 = settings.sortMode === "pattern2";
 
   return el(
     "form",
@@ -577,17 +590,17 @@ function renderSettingsForm() {
     ),
     el(
       "fieldset",
-      { class: "field-span" },
+      { class: `field-span ${isPattern1 ? "" : "inactive"}` },
       el("legend", {}, "1枚ずつ提出: 失敗時のライフ"),
-      radio("pattern1LifeRule", "flat", "一律 -1", settings.pattern1LifeRule === "flat", disabled),
-      radio("pattern1LifeRule", "skipped", "飛ばした枚数分", settings.pattern1LifeRule === "skipped", disabled)
+      radio("pattern1LifeRule", "flat", "一律 -1", settings.pattern1LifeRule === "flat", disabled || !isPattern1),
+      radio("pattern1LifeRule", "skipped", "飛ばした枚数分", settings.pattern1LifeRule === "skipped", disabled || !isPattern1)
     ),
     el(
       "fieldset",
-      { class: "field-span" },
+      { class: `field-span ${isPattern2 ? "" : "inactive"}` },
       el("legend", {}, "全カード一括: 失敗時のライフ"),
-      radio("pattern2LifeRule", "flat", "一律 -1", settings.pattern2LifeRule === "flat", disabled),
-      radio("pattern2LifeRule", "moved", "最小移動枚数分", settings.pattern2LifeRule === "moved", disabled)
+      radio("pattern2LifeRule", "skipped", "飛ばされたカード枚数分", settings.pattern2LifeRule === "skipped", disabled || !isPattern2),
+      radio("pattern2LifeRule", "moved", "最小移動枚数分", settings.pattern2LifeRule === "moved", disabled || !isPattern2)
     ),
     el(
       "fieldset",
@@ -1087,9 +1100,7 @@ function renderFinalRound(log) {
     el(
       "div",
       { class: "final-card-grid" },
-      ...[...log.cards]
-        .sort((a, b) => a.number - b.number)
-        .map((card) => renderFinalCard(card, culpritPlayerId))
+      ...getLogDisplayCards(log).map((card) => renderFinalCard(card, culpritPlayerId))
     )
   );
 }
@@ -1265,9 +1276,14 @@ async function handleNameSubmit(event) {
       return room;
     });
     appState.playerId = playerId;
+    appState.nameDraft = "";
     savePlayerId(appState.room.id, playerId);
     syncPresence(appState.room);
   });
+}
+
+function handleNameDraftInput(event) {
+  appState.nameDraft = event.currentTarget.value;
 }
 
 function handleSettingsChange(event) {
@@ -1278,17 +1294,30 @@ function handleSettingsChange(event) {
 
 function readSettingsFromForm(formElement) {
   const form = new FormData(formElement);
+  const currentSettings = appState.room ? appState.room.settings : DEFAULT_SETTINGS;
   return {
     maxRounds: clampInt(form.get("maxRounds"), 1, 20, 3),
     initialLife: clampInt(form.get("initialLife"), 1, 30, 3),
     cardIncrement: clampInt(form.get("cardIncrement"), 1, 20, 1),
     cardLimit: clampInt(form.get("cardLimit"), 1, 100, 5),
     sortMode: form.get("sortMode") === "pattern2" ? "pattern2" : "pattern1",
-    pattern1LifeRule: form.get("pattern1LifeRule") === "skipped" ? "skipped" : "flat",
-    pattern2LifeRule: form.get("pattern2LifeRule") === "moved" ? "moved" : "flat",
+    pattern1LifeRule: form.has("pattern1LifeRule")
+      ? normalizePattern1LifeRule(form.get("pattern1LifeRule"))
+      : currentSettings.pattern1LifeRule,
+    pattern2LifeRule: form.has("pattern2LifeRule")
+      ? normalizePattern2LifeRule(form.get("pattern2LifeRule"))
+      : currentSettings.pattern2LifeRule,
     culpritTokens: form.get("culpritTokens") === "true",
     inputVisibility: form.get("inputVisibility") === "live" ? "live" : "afterWriting"
   };
+}
+
+function normalizePattern1LifeRule(value) {
+  return value === "skipped" ? "skipped" : "flat";
+}
+
+function normalizePattern2LifeRule(value) {
+  return value === "moved" ? "moved" : "skipped";
 }
 
 function readVisibleSettings() {
@@ -1827,7 +1856,7 @@ function buildExportText(room) {
     if (index > 0) lines.push("");
     lines.push(`--- お題：${log.theme} ---`);
     const culpritPlayerId = log.voteResult && log.voteResult.playerId ? log.voteResult.playerId : null;
-    for (const card of [...log.cards].sort((a, b) => a.number - b.number)) {
+    for (const card of getLogDisplayCards(log)) {
       const culpritMark = card.playerId === culpritPlayerId ? " ★うっかりさん" : "";
       lines.push(`${card.playerName}：${card.text} (${card.number})${culpritMark}`);
     }
@@ -1836,8 +1865,24 @@ function buildExportText(room) {
   return lines.join("\n");
 }
 
+function getLogDisplayCards(log) {
+  if (log.sortMode === "pattern2" && Array.isArray(log.arrangedCardIds) && log.arrangedCardIds.length) {
+    const cardsById = new Map((log.cards || []).map((card) => [card.id, card]));
+    const orderedCards = log.arrangedCardIds
+      .map((cardId) => cardsById.get(cardId))
+      .filter(Boolean);
+    for (const card of log.cards || []) {
+      if (!orderedCards.some((item) => item.id === card.id)) orderedCards.push(card);
+    }
+    return orderedCards;
+  }
+  return [...(log.cards || [])].sort((a, b) => a.number - b.number);
+}
+
 function normalizeRoom(room) {
   const settings = { ...DEFAULT_SETTINGS, ...(room.settings || {}) };
+  settings.pattern1LifeRule = normalizePattern1LifeRule(settings.pattern1LifeRule);
+  settings.pattern2LifeRule = normalizePattern2LifeRule(settings.pattern2LifeRule);
   const players = Array.isArray(room.players)
     ? room.players.map((player) => ({
         ...player,
@@ -2005,7 +2050,20 @@ function getPattern2FailedCardIds(orderedCards) {
 function getPattern2LifeLoss(numbers, rule) {
   if (!hasInversion(numbers)) return 0;
   if (rule === "moved") return numbers.length - longestIncreasingSubsequenceLength(numbers);
-  return 1;
+  return countPattern2SkippedCards(numbers);
+}
+
+function countPattern2SkippedCards(numbers) {
+  let skipped = 0;
+  let maxNumber = -Infinity;
+  for (const number of numbers) {
+    if (number < maxNumber) {
+      skipped += 1;
+    } else {
+      maxNumber = number;
+    }
+  }
+  return skipped;
 }
 
 function hasInversion(numbers) {
@@ -2267,7 +2325,7 @@ function pattern1LifeRuleLabel(value) {
 }
 
 function pattern2LifeRuleLabel(value) {
-  return value === "moved" ? "最小移動枚数分" : "一律 -1";
+  return value === "moved" ? "最小移動枚数分" : "飛ばされたカード枚数分";
 }
 
 function inputVisibilityLabel(value) {
@@ -2326,6 +2384,7 @@ function leaveRoomUrl() {
   appState.hostKey = null;
   appState.room = null;
   appState.missingRoom = false;
+  appState.nameDraft = "";
   clearWritingDrafts();
   stopPresenceHeartbeat();
   appState.store.disconnect();

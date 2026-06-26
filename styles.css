@@ -566,6 +566,11 @@ fieldset {
   border-radius: 8px;
 }
 
+fieldset.inactive {
+  opacity: 0.52;
+  background: linear-gradient(180deg, #f7faf9, #eef5f4);
+}
+
 legend {
   padding: 0 6px;
   color: #486d73;
