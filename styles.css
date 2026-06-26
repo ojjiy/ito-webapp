@@ -1194,6 +1194,68 @@ legend {
   width: 100%;
 }
 
+.game-outcome {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  overflow: hidden;
+  padding: clamp(22px, 5vw, 44px);
+  border: 3px solid #fff;
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 1px #b8e0db,
+    0 9px 0 rgba(124, 182, 174, 0.22);
+}
+
+.game-outcome.failure {
+  background:
+    linear-gradient(135deg, rgba(232, 249, 255, 0.96), rgba(211, 232, 248, 0.9)),
+    #eef8fb;
+}
+
+.game-outcome.clear {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(232, 249, 255, 0.86)),
+    #fff;
+}
+
+.game-outcome-kicker {
+  color: #527985;
+  font-size: 0.92rem;
+  font-weight: 950;
+}
+
+.game-outcome-title {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: clamp(3rem, 9vw, 7.4rem);
+  font-weight: 950;
+  line-height: 0.94;
+}
+
+.game-outcome.failure .game-outcome-title {
+  color: #1f6f9a;
+  text-shadow:
+    0 3px 0 #ffffff,
+    0 8px 22px rgba(31, 111, 154, 0.2);
+}
+
+.game-outcome.clear .game-outcome-title {
+  color: transparent;
+  background: linear-gradient(90deg, #49b7d2, #60c887, #f0d45b, #f49a79, #b58bea, #49b7d2);
+  background-clip: text;
+  -webkit-background-clip: text;
+  text-shadow: 0 8px 22px rgba(73, 183, 210, 0.2);
+}
+
+.game-outcome p {
+  max-width: 46rem;
+  color: #3e656b;
+  font-size: clamp(1rem, 2vw, 1.28rem);
+  font-weight: 900;
+  line-height: 1.45;
+}
+
 .clear-history {
   display: grid;
   gap: 10px;

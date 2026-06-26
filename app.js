@@ -36,7 +36,8 @@ const appState = {
   loading: false,
   settingsSaveTimer: null,
   notice: "",
-  error: ""
+  error: "",
+  textDrafts: {}
 };
 
 const root = document.querySelector("#app");
@@ -195,6 +196,7 @@ async function boot() {
         appState.playerId = null;
         clearPlayerId(room.id);
       }
+      pruneWritingDrafts(room);
       render();
     },
     onMissing: (missing) => {
@@ -217,12 +219,38 @@ async function boot() {
 }
 
 function render() {
+  const activeInput = captureWritingInputFocus();
   root.replaceChildren(
     appShell(
       appState.room ? renderRoom() : renderEntry()
     )
   );
+  restoreWritingInputFocus(activeInput);
   scrollSubmissionTracksToEnd();
+}
+
+function captureWritingInputFocus() {
+  const active = document.activeElement;
+  if (!active || active.tagName !== "INPUT" || !active.closest(".card-input-list")) return null;
+  return {
+    name: active.name,
+    selectionStart: active.selectionStart,
+    selectionEnd: active.selectionEnd
+  };
+}
+
+function restoreWritingInputFocus(activeInput) {
+  if (!activeInput || !activeInput.name) return;
+  const input = Array.from(document.querySelectorAll(".card-input-list input"))
+    .find((item) => item.name === activeInput.name && !item.disabled);
+  if (!input) return;
+
+  input.focus({ preventScroll: true });
+  if (typeof input.setSelectionRange === "function") {
+    const start = activeInput.selectionStart ?? input.value.length;
+    const end = activeInput.selectionEnd ?? start;
+    input.setSelectionRange(start, end);
+  }
 }
 
 function scrollSubmissionTracksToEnd() {
@@ -249,7 +277,7 @@ function appShell(content) {
     el(
       "header",
       { class: "topbar" },
-      el("div", { class: "brand" }, el("span", { class: "brand-mark" }, "ito"), el("span", {}, "itoのお茶会")),
+      el("div", { class: "brand" }, el("span", { class: "brand-mark" }, "ito"), el("span", {}, "ito")),
       el(
         "div",
         { class: "topbar-meta" },
@@ -618,7 +646,18 @@ function renderWriting() {
               el("span", {}, `#${index + 1}`),
               el("strong", { class: "card-number-chip graded", style: cardNumberStyle(card.number) }, String(card.number))
             ),
-            label("この数字を表すワード", el("input", { name: card.id, maxlength: "80", value: card.text, placeholder: "短いワードで表す", disabled: ownReady, required: true }))
+            label(
+              "この数字を表すワード",
+              el("input", {
+                name: card.id,
+                maxlength: "80",
+                value: getWritingDraftValue(card),
+                placeholder: "短いワードで表す",
+                disabled: ownReady,
+                required: true,
+                oninput: handleWritingDraftInput
+              })
+            )
           )
         ),
         ownCards.length
@@ -671,6 +710,43 @@ function renderVisibleInputTexts(cards) {
       )
     )
   );
+}
+
+function getWritingDraftValue(card) {
+  if (card.text.trim().length > 0) return card.text;
+  return hasOwn(appState.textDrafts, card.id) ? appState.textDrafts[card.id] : card.text;
+}
+
+function handleWritingDraftInput(event) {
+  const input = event.currentTarget;
+  if (!input.name) return;
+  appState.textDrafts[input.name] = input.value;
+}
+
+function clearWritingDrafts(cardIds = null) {
+  if (!cardIds) {
+    appState.textDrafts = {};
+    return;
+  }
+  for (const cardId of cardIds) {
+    delete appState.textDrafts[cardId];
+  }
+}
+
+function pruneWritingDrafts(room) {
+  if (!room || room.phase !== "writing" || !room.currentRound || !appState.playerId) {
+    clearWritingDrafts();
+    return;
+  }
+
+  const activeDraftCardIds = new Set(
+    room.currentRound.cards
+      .filter((card) => card.playerId === appState.playerId && card.text.trim().length === 0)
+      .map((card) => card.id)
+  );
+  for (const cardId of Object.keys(appState.textDrafts)) {
+    if (!activeDraftCardIds.has(cardId)) delete appState.textDrafts[cardId];
+  }
 }
 
 function renderSubmit() {
@@ -865,6 +941,7 @@ function renderGameOver() {
   const room = appState.room;
   const text = buildExportText(room);
   return panel("最終結果", [
+    renderGameOutcome(room),
     renderClearHistory(room),
     renderFinalResults(room),
     el(
@@ -875,6 +952,19 @@ function renderGameOver() {
       isHost() ? button("設定を変えてもう一度", resetToLobby, "secondary") : null
     )
   ]);
+}
+
+function renderGameOutcome(room) {
+  const latestLog = room.logs[room.logs.length - 1];
+  const isClear = room.endReason === "rounds";
+  const roundNumber = latestLog ? latestLog.roundNumber : room.round || 1;
+  return el(
+    "section",
+    { class: `game-outcome ${isClear ? "clear" : "failure"}` },
+    el("span", { class: "game-outcome-kicker" }, isClear ? "完走" : "結果"),
+    el("strong", { class: "game-outcome-title" }, isClear ? "CLEAR!" : `Round ${roundNumber} で失敗...`),
+    el("p", {}, isClear ? "すべてのラウンドを乗り切りました" : "ここまでのカードを確認しましょう")
+  );
 }
 
 function renderFinalResults(room) {
@@ -1185,6 +1275,7 @@ async function handleThemeSubmit(event) {
 async function handleTextSubmit(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
+  const submittedCardIds = Array.from(form.keys()).map((key) => String(key));
 
   await runAction(async () => {
     await appState.store.update((room) => {
@@ -1201,6 +1292,7 @@ async function handleTextSubmit(event) {
       }
       return room;
     });
+    clearWritingDrafts(submittedCardIds);
   });
 }
 
@@ -1814,6 +1906,7 @@ function leaveRoomUrl() {
   appState.hostKey = null;
   appState.room = null;
   appState.missingRoom = false;
+  clearWritingDrafts();
   appState.store.disconnect();
   render();
 }
@@ -1900,6 +1993,10 @@ function clampInt(value, min, max, fallback) {
 
 function deepCopy(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 function localRoomKey(roomId) {
