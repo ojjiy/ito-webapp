@@ -2,6 +2,11 @@ const FIREBASE_APP_URL = "https://www.gstatic.com/firebasejs/10.12.5/firebase-ap
 const FIREBASE_STORE_URL = "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 const FIREBASE_APP_CHECK_URL = "https://www.gstatic.com/firebasejs/10.12.5/firebase-app-check.js";
 
+const ROOM_ID_MAX_ATTEMPTS = 8;
+const ROOM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const PRESENCE_HEARTBEAT_MS = 30 * 1000;
+const HOST_STALE_MS = 90 * 1000;
+
 const PHASE_LABELS = {
   lobby: "ロビー",
   theme: "お題",
@@ -35,12 +40,22 @@ const appState = {
   syncMode: "local",
   loading: false,
   settingsSaveTimer: null,
+  presenceTimer: null,
+  lastPresenceUpdateAt: 0,
+  autoHostClaimInFlight: false,
   notice: "",
   error: "",
   textDrafts: {}
 };
 
 const root = document.querySelector("#app");
+
+class RoomIdCollisionError extends Error {
+  constructor(roomId) {
+    super(`ルームID ${roomId} は既に使われています。`);
+    this.name = "RoomIdCollisionError";
+  }
+}
 
 class RoomStore {
   constructor({ onRoom, onMissing, onMode, onError }) {
@@ -97,15 +112,20 @@ class RoomStore {
 
   async create(room) {
     const normalized = normalizeRoom(room);
-    this.roomId = normalized.id;
 
     if (this.mode === "firebase") {
       const ref = this.fs.doc(this.db, "rooms", normalized.id);
-      await this.fs.setDoc(ref, normalized);
+      await this.fs.runTransaction(this.db, async (transaction) => {
+        const snapshot = await transaction.get(ref);
+        if (snapshot.exists()) throw new RoomIdCollisionError(normalized.id);
+        transaction.set(ref, normalized);
+      });
     } else {
+      if (readLocalRoom(normalized.id)) throw new RoomIdCollisionError(normalized.id);
       writeLocalRoom(normalized);
     }
 
+    this.roomId = normalized.id;
     await this.connect(normalized.id);
   }
 
@@ -171,6 +191,7 @@ class RoomStore {
         const next = mutator(deepCopy(current));
         if (!next) return;
         next.updatedAt = nowIso();
+        next.expiresAt = expirationDateFromNow();
         transaction.set(ref, normalizeRoom(next));
       });
       return;
@@ -181,6 +202,7 @@ class RoomStore {
     const next = mutator(deepCopy(current));
     if (!next) return;
     next.updatedAt = nowIso();
+    next.expiresAt = expirationDateFromNow();
     this.room = normalizeRoom(next);
     writeLocalRoom(this.room);
     this.onMissing(false);
@@ -197,10 +219,12 @@ async function boot() {
         clearPlayerId(room.id);
       }
       pruneWritingDrafts(room);
+      syncPresence(room);
       render();
     },
     onMissing: (missing) => {
       appState.missingRoom = missing;
+      if (missing) stopPresenceHeartbeat();
       render();
     },
     onMode: (mode) => {
@@ -450,7 +474,8 @@ function renderSidePanel() {
       { class: "side-section" },
       el("h2", {}, "あなた"),
       el("p", { class: "side-value" }, player ? player.name : "-"),
-      isHost() ? el("div", { class: "side-pills" }, pill("ホスト", "ok")) : null
+      isHost() ? el("div", { class: "side-pills" }, pill("ホスト", "ok")) : null,
+      player && !isHost() ? button("ホストを引き継ぐ", claimHost, "secondary compact") : null
     ),
     el(
       "section",
@@ -1093,31 +1118,41 @@ function renderFinalPlayers() {
 
 async function createRoom() {
   await runAction(async () => {
-    const roomId = makeRoomId();
     const key = crypto.randomUUID();
-    const room = normalizeRoom({
-      id: roomId,
-      hostKey: key,
-      phase: "lobby",
-      settings: DEFAULT_SETTINGS,
-      players: [],
-      round: 0,
-      life: DEFAULT_SETTINGS.initialLife,
-      currentRound: null,
-      logs: [],
-      clearHistory: { failures: {}, clears: 0 },
-      endReason: null,
-      roomMessage: null,
-      createdAt: nowIso(),
-      updatedAt: nowIso()
-    });
+    for (let attempt = 0; attempt < ROOM_ID_MAX_ATTEMPTS; attempt += 1) {
+      const roomId = makeRoomId();
+      const room = normalizeRoom({
+        id: roomId,
+        hostKey: key,
+        phase: "lobby",
+        settings: DEFAULT_SETTINGS,
+        players: [],
+        round: 0,
+        life: DEFAULT_SETTINGS.initialLife,
+        currentRound: null,
+        logs: [],
+        clearHistory: { failures: {}, clears: 0 },
+        endReason: null,
+        roomMessage: null,
+        expiresAt: expirationDateFromNow(),
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      });
 
-    saveHostKey(roomId, key);
-    setRoomUrl(roomId);
-    appState.roomId = roomId;
-    appState.playerId = null;
-    appState.hostKey = key;
-    await appState.store.create(room);
+      try {
+        await appState.store.create(room);
+        saveHostKey(roomId, key);
+        setRoomUrl(roomId);
+        appState.roomId = roomId;
+        appState.playerId = null;
+        appState.hostKey = key;
+        return;
+      } catch (error) {
+        if (!(error instanceof RoomIdCollisionError)) throw error;
+      }
+    }
+
+    throw new Error("ルームIDの生成に失敗しました。もう一度お試しください。");
   });
 }
 
@@ -1146,6 +1181,7 @@ async function handleNameSubmit(event) {
         id: playerId,
         name,
         culpritTokens: 0,
+        lastSeenAt: nowIso(),
         joinedAt: nowIso()
       });
       if (room.hostKey && appState.hostKey === room.hostKey && !room.hostPlayerId) {
@@ -1156,6 +1192,7 @@ async function handleNameSubmit(event) {
     });
     appState.playerId = playerId;
     savePlayerId(appState.room.id, playerId);
+    syncPresence(appState.room);
   });
 }
 
@@ -1616,7 +1653,12 @@ function buildExportText(room) {
 
 function normalizeRoom(room) {
   const settings = { ...DEFAULT_SETTINGS, ...(room.settings || {}) };
-  const players = Array.isArray(room.players) ? room.players : [];
+  const players = Array.isArray(room.players)
+    ? room.players.map((player) => ({
+        ...player,
+        lastSeenAt: player.lastSeenAt || player.joinedAt || null
+      }))
+    : [];
   const hostPlayerId =
     room.hostPlayerId && players.some((player) => player.id === room.hostPlayerId)
       ? room.hostPlayerId
@@ -1637,6 +1679,7 @@ function normalizeRoom(room) {
     clearHistory: normalizeClearHistory(room.clearHistory),
     endReason: room.endReason || null,
     roomMessage: room.roomMessage || null,
+    expiresAt: normalizeDateTime(room.expiresAt, expirationDateFromNow()),
     createdAt: room.createdAt || nowIso(),
     updatedAt: room.updatedAt || nowIso()
   };
@@ -1828,6 +1871,105 @@ function removePlayerFromRoom(room, playerId, { self = false } = {}) {
   }
 }
 
+function syncPresence(room) {
+  const currentPlayerActive = Boolean(
+    room &&
+      appState.playerId &&
+      room.players.some((player) => player.id === appState.playerId)
+  );
+
+  if (!currentPlayerActive) {
+    stopPresenceHeartbeat();
+    return;
+  }
+
+  if (!appState.presenceTimer) {
+    appState.presenceTimer = window.setInterval(sendPresenceHeartbeat, PRESENCE_HEARTBEAT_MS);
+  }
+
+  if (Date.now() - appState.lastPresenceUpdateAt >= PRESENCE_HEARTBEAT_MS) {
+    sendPresenceHeartbeat();
+  }
+  maybeAutoClaimStaleHost(room);
+}
+
+function stopPresenceHeartbeat() {
+  if (appState.presenceTimer) {
+    window.clearInterval(appState.presenceTimer);
+    appState.presenceTimer = null;
+  }
+  appState.lastPresenceUpdateAt = 0;
+  appState.autoHostClaimInFlight = false;
+}
+
+async function sendPresenceHeartbeat() {
+  if (appState.loading || !appState.store || !appState.room || !appState.playerId) return;
+  if (Date.now() - appState.lastPresenceUpdateAt < PRESENCE_HEARTBEAT_MS) return;
+
+  appState.lastPresenceUpdateAt = Date.now();
+  try {
+    await appState.store.update((room) => {
+      if (!markPlayerSeen(room, appState.playerId)) return null;
+      return room;
+    });
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function markPlayerSeen(room, playerId, seenAt = nowIso()) {
+  let changed = false;
+  room.players = room.players.map((player) => {
+    if (player.id !== playerId) return player;
+    changed = true;
+    return { ...player, lastSeenAt: seenAt };
+  });
+  return changed;
+}
+
+function maybeAutoClaimStaleHost(room) {
+  if (appState.loading || appState.autoHostClaimInFlight || !appState.playerId || isHost()) return;
+
+  const candidateId = getAutoHostCandidateId(room, Date.now(), appState.playerId);
+  if (candidateId !== appState.playerId) return;
+
+  appState.autoHostClaimInFlight = true;
+  appState.store.update((latestRoom) => {
+    const latestCandidateId = getAutoHostCandidateId(latestRoom, Date.now(), appState.playerId);
+    if (latestCandidateId !== appState.playerId) return null;
+    markPlayerSeen(latestRoom, appState.playerId);
+    latestRoom.hostPlayerId = appState.playerId;
+    return latestRoom;
+  }).catch((error) => {
+    console.error(error);
+  }).finally(() => {
+    appState.autoHostClaimInFlight = false;
+  });
+}
+
+function getAutoHostCandidateId(room, nowMs = Date.now(), fallbackPlayerId = null) {
+  if (!room || !room.players.length || !isHostStale(room, nowMs)) return null;
+  const activePlayers = room.players.filter((player) =>
+    player.id !== room.hostPlayerId && isPlayerRecentlySeen(player, nowMs)
+  );
+  if (activePlayers.length) return activePlayers[0].id;
+  return fallbackPlayerId && room.players.some((player) => player.id === fallbackPlayerId)
+    ? fallbackPlayerId
+    : null;
+}
+
+function isHostStale(room, nowMs = Date.now()) {
+  if (!room.hostPlayerId) return true;
+  const host = room.players.find((player) => player.id === room.hostPlayerId);
+  if (!host) return true;
+  return !isPlayerRecentlySeen(host, nowMs);
+}
+
+function isPlayerRecentlySeen(player, nowMs = Date.now()) {
+  const seenAtMs = dateTimeToMillis(player.lastSeenAt);
+  return seenAtMs !== null && nowMs - seenAtMs <= HOST_STALE_MS;
+}
+
 function requirePhase(room, phase) {
   if (room.phase !== phase) throw new Error(`現在は${PHASE_LABELS[room.phase] || room.phase}フェーズです。`);
 }
@@ -1907,6 +2049,7 @@ function leaveRoomUrl() {
   appState.room = null;
   appState.missingRoom = false;
   clearWritingDrafts();
+  stopPresenceHeartbeat();
   appState.store.disconnect();
   render();
 }
@@ -1961,6 +2104,18 @@ async function removePlayer(playerId) {
   });
 }
 
+async function claimHost() {
+  await runAction(async () => {
+    await appState.store.update((room) => {
+      const playerExists = appState.playerId && room.players.some((player) => player.id === appState.playerId);
+      if (!playerExists) throw new Error("参加者だけがホストを引き継げます。");
+      markPlayerSeen(room, appState.playerId);
+      room.hostPlayerId = appState.playerId;
+      return room;
+    });
+  });
+}
+
 function getShareUrl(roomId) {
   const url = new URL(window.location.href);
   url.searchParams.set("room", roomId);
@@ -1983,6 +2138,28 @@ function makeRoomId() {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function expirationDateFromNow() {
+  return new Date(Date.now() + ROOM_TTL_MS);
+}
+
+function normalizeDateTime(value, fallback) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (value && typeof value.toDate === "function") {
+    const date = value.toDate();
+    if (date instanceof Date && !Number.isNaN(date.getTime())) return date;
+  }
+  if (typeof value === "string" || typeof value === "number") {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+  return fallback;
+}
+
+function dateTimeToMillis(value) {
+  const date = normalizeDateTime(value, null);
+  return date ? date.getTime() : null;
 }
 
 function clampInt(value, min, max, fallback) {
