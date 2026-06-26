@@ -525,7 +525,7 @@ function renderSidePanel() {
             ["追加", `${settings.cardIncrement}`],
             ["手札上限", `${settings.cardLimit}`],
             ["提出方式", sortModeLabel(settings.sortMode)],
-            ["失敗時", pattern1LifeRuleLabel(settings.pattern1LifeRule)],
+            ["失敗時", lifeRuleLabel(settings)],
             ["うっかり投票", settings.culpritTokens ? "あり" : "なし"],
             ["ワード公開", inputVisibilityLabel(settings.inputVisibility)]
           ])
@@ -573,14 +573,21 @@ function renderSettingsForm() {
       { class: "field-span" },
       el("legend", {}, "提出方式"),
       radio("sortMode", "pattern1", "1枚ずつ提出", settings.sortMode === "pattern1", disabled),
-      radio("sortMode", "pattern2", "全カード一括（準備中）", false, true)
+      radio("sortMode", "pattern2", "全カード一括", settings.sortMode === "pattern2", disabled)
     ),
     el(
       "fieldset",
       { class: "field-span" },
-      el("legend", {}, "失敗時のライフ"),
+      el("legend", {}, "1枚ずつ提出: 失敗時のライフ"),
       radio("pattern1LifeRule", "flat", "一律 -1", settings.pattern1LifeRule === "flat", disabled),
       radio("pattern1LifeRule", "skipped", "飛ばした枚数分", settings.pattern1LifeRule === "skipped", disabled)
+    ),
+    el(
+      "fieldset",
+      { class: "field-span" },
+      el("legend", {}, "全カード一括: 失敗時のライフ"),
+      radio("pattern2LifeRule", "flat", "一律 -1", settings.pattern2LifeRule === "flat", disabled),
+      radio("pattern2LifeRule", "moved", "最小移動枚数分", settings.pattern2LifeRule === "moved", disabled)
     ),
     el(
       "fieldset",
@@ -775,13 +782,76 @@ function pruneWritingDrafts(room) {
 }
 
 function renderSubmit() {
-  const round = appState.room.currentRound;
+  const room = appState.room;
+  const round = room.currentRound;
+  if (isPattern2Round(room, round)) return renderPattern2Submit();
+
   return panel("場のカード", [
     themeHero(round.roundNumber, round.theme),
     renderSubmissionTrack(round),
     renderTableCards({ showRevealed: false }),
     renderOwnSubmitCards()
   ]);
+}
+
+function renderPattern2Submit() {
+  const room = appState.room;
+  const round = appState.room.currentRound;
+  const canEdit = isHost();
+  return panel("カードを並べ替える", [
+    themeHero(round.roundNumber, round.theme),
+    el("p", { class: "muted-text microcopy" }, "左から小さい順になるように並べ替えます。数字は判定まで公開されません。"),
+    renderPattern2ArrangeBoard(round, canEdit),
+    canEdit
+      ? el(
+          "div",
+          { class: "action-row" },
+          button("この並びで判定", confirmPattern2Order, "primary")
+        )
+      : el("p", { class: "muted-text" }, "ホストの判定待ち")
+  ]);
+}
+
+function renderPattern2ArrangeBoard(round, canEdit) {
+  const orderedCards = getPattern2OrderedCards(round);
+  return el(
+    "div",
+    { class: "arrange-board" },
+    ...orderedCards.map((card, index) => renderPattern2ArrangeCard(card, index, orderedCards.length, canEdit))
+  );
+}
+
+function renderPattern2ArrangeCard(card, index, total, canEdit) {
+  const player = getPlayer(card.playerId);
+  const dragAttrs = canEdit
+    ? {
+        draggable: "true",
+        ondragstart: (event) => handlePattern2DragStart(event, card.id),
+        ondragover: handlePattern2DragOver,
+        ondrop: (event) => handlePattern2Drop(event, card.id)
+      }
+    : {};
+
+  return el(
+    "article",
+    { class: `arrange-card ${canEdit ? "editable" : ""}`, ...dragAttrs },
+    el(
+      "div",
+      { class: "arrange-card-head" },
+      el("span", { class: "arrange-position" }, String(index + 1)),
+      el("strong", { class: "card-number-chip hidden-number" }, "?")
+    ),
+    el("p", {}, card.text || "未入力"),
+    el("small", {}, player ? player.name : "不明"),
+    canEdit
+      ? el(
+          "div",
+          { class: "arrange-actions" },
+          button("←", () => movePattern2CardByOffset(card.id, -1), "ghost compact", { disabled: index === 0, ariaLabel: "左へ移動" }),
+          button("→", () => movePattern2CardByOffset(card.id, 1), "ghost compact", { disabled: index >= total - 1, ariaLabel: "右へ移動" })
+        )
+      : null
+  );
 }
 
 function renderSubmitReview() {
@@ -807,9 +877,11 @@ function renderSubmitReview() {
 }
 
 function renderTableCards({ showRevealed = true } = {}) {
-  const round = appState.room.currentRound;
-  const activeCards = round.cards.filter((card) => !card.revealed);
-  const revealedCards = round.cards.filter((card) => card.revealed);
+  const room = appState.room;
+  const round = room.currentRound;
+  const cards = isPattern2Round(room, round) ? getPattern2OrderedCards(round) : round.cards;
+  const activeCards = cards.filter((card) => !card.revealed);
+  const revealedCards = cards.filter((card) => card.revealed);
 
   return el(
     "div",
@@ -836,9 +908,11 @@ function renderTableCards({ showRevealed = true } = {}) {
 }
 
 function renderSubmissionTrack(round) {
-  const revealedCards = round.cards
-    .filter((card) => card.revealed)
-    .sort((a, b) => a.number - b.number);
+  const revealedCards = isPattern2Round(appState.room, round)
+    ? getPattern2OrderedCards(round).filter((card) => card.revealed)
+    : round.cards
+        .filter((card) => card.revealed)
+        .sort((a, b) => a.number - b.number);
   if (!revealedCards.length) return null;
 
   return el(
@@ -1209,9 +1283,9 @@ function readSettingsFromForm(formElement) {
     initialLife: clampInt(form.get("initialLife"), 1, 30, 3),
     cardIncrement: clampInt(form.get("cardIncrement"), 1, 20, 1),
     cardLimit: clampInt(form.get("cardLimit"), 1, 100, 5),
-    sortMode: "pattern1",
+    sortMode: form.get("sortMode") === "pattern2" ? "pattern2" : "pattern1",
     pattern1LifeRule: form.get("pattern1LifeRule") === "skipped" ? "skipped" : "flat",
-    pattern2LifeRule: "flat",
+    pattern2LifeRule: form.get("pattern2LifeRule") === "moved" ? "moved" : "flat",
     culpritTokens: form.get("culpritTokens") === "true",
     inputVisibility: form.get("inputVisibility") === "live" ? "live" : "afterWriting"
   };
@@ -1294,8 +1368,12 @@ async function handleThemeSubmit(event) {
       room.currentRound = {
         roundNumber: nextRound,
         theme,
+        sortMode: room.settings.sortMode,
+        pattern1LifeRule: room.settings.pattern1LifeRule,
+        pattern2LifeRule: room.settings.pattern2LifeRule,
         playerIds: room.players.map((player) => player.id),
         cards,
+        arrangedCardIds: room.settings.sortMode === "pattern2" ? cards.map((card) => card.id) : [],
         submitLog: [],
         votes: {},
         voteResult: null,
@@ -1352,6 +1430,7 @@ async function submitCard(cardId) {
     await appState.store.update((room) => {
       requirePhase(room, "submit");
       const round = room.currentRound;
+      if (isPattern2Round(room, round)) throw new Error("このラウンドは全カード一括判定です。");
       const card = round.cards.find((item) => item.id === cardId);
       if (!card) throw new Error("カードが見つかりません。");
       if (card.playerId !== appState.playerId) throw new Error("自分のカードだけ提出できます。");
@@ -1360,7 +1439,7 @@ async function submitCard(cardId) {
       const activeCards = round.cards.filter((item) => !item.revealed);
       const skippedCards = activeCards.filter((item) => item.id !== card.id && item.number < card.number);
       const success = skippedCards.length === 0;
-      const lifeLoss = success ? 0 : room.settings.pattern1LifeRule === "skipped" ? skippedCards.length : 1;
+      const lifeLoss = success ? 0 : (round.pattern1LifeRule || room.settings.pattern1LifeRule) === "skipped" ? skippedCards.length : 1;
       const skippedIds = new Set(skippedCards.map((item) => item.id));
 
       round.cards = round.cards.map((item) => {
@@ -1404,6 +1483,110 @@ async function submitCard(cardId) {
       return room;
     });
   });
+}
+
+function handlePattern2DragStart(event, cardId) {
+  if (!event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", cardId);
+}
+
+function handlePattern2DragOver(event) {
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function handlePattern2Drop(event, targetCardId) {
+  event.preventDefault();
+  if (!event.dataTransfer) return;
+  const draggedCardId = event.dataTransfer.getData("text/plain");
+  if (!draggedCardId || draggedCardId === targetCardId) return;
+  movePattern2CardBefore(draggedCardId, targetCardId);
+}
+
+async function movePattern2CardBefore(cardId, targetCardId) {
+  await runAction(async () => {
+    await appState.store.update((room) => {
+      requireHost(room);
+      requirePhase(room, "submit");
+      const round = room.currentRound;
+      requirePattern2Round(room, round);
+      round.arrangedCardIds = moveBefore(getPattern2CardIds(round), cardId, targetCardId);
+      return room;
+    });
+  });
+}
+
+async function movePattern2CardByOffset(cardId, offset) {
+  await runAction(async () => {
+    await appState.store.update((room) => {
+      requireHost(room);
+      requirePhase(room, "submit");
+      const round = room.currentRound;
+      requirePattern2Round(room, round);
+      const ids = getPattern2CardIds(round);
+      const index = ids.indexOf(cardId);
+      if (index < 0) throw new Error("カードが見つかりません。");
+      const nextIndex = Math.max(0, Math.min(ids.length - 1, index + offset));
+      if (nextIndex === index) return room;
+      ids.splice(index, 1);
+      ids.splice(nextIndex, 0, cardId);
+      round.arrangedCardIds = ids;
+      return room;
+    });
+  });
+}
+
+async function confirmPattern2Order() {
+  await runAction(async () => {
+    await appState.store.update((room) => {
+      requireHost(room);
+      requirePhase(room, "submit");
+      const round = room.currentRound;
+      requirePattern2Round(room, round);
+      finalizePattern2Order(room);
+      return room;
+    });
+  });
+}
+
+function finalizePattern2Order(room) {
+  const round = room.currentRound;
+  const orderedCards = getPattern2OrderedCards(round);
+  const failedCardIds = getPattern2FailedCardIds(orderedCards);
+  const hasFailure = failedCardIds.size > 0;
+  const lifeLoss = hasFailure
+    ? getPattern2LifeLoss(orderedCards.map((card) => card.number), round.pattern2LifeRule || room.settings.pattern2LifeRule)
+    : 0;
+
+  round.arrangedCardIds = orderedCards.map((card) => card.id);
+  round.cards = round.cards.map((card) => ({
+    ...card,
+    revealed: true,
+    submitted: true,
+    failed: failedCardIds.has(card.id)
+  }));
+  round.submitLog.push({
+    type: "pattern2",
+    orderedCards: orderedCards.map((card) => ({
+      cardId: card.id,
+      playerId: card.playerId,
+      playerName: getPlayerName(room, card.playerId),
+      number: card.number,
+      text: card.text,
+      failed: failedCardIds.has(card.id)
+    })),
+    success: !hasFailure,
+    lifeLoss,
+    at: nowIso()
+  });
+
+  if (lifeLoss > 0) {
+    round.lifeLost += lifeLoss;
+    room.life -= lifeLoss;
+  }
+
+  room.phase = "submitReview";
 }
 
 async function proceedAfterSubmitReview() {
@@ -1580,6 +1763,8 @@ function buildRoundLog(room, round, afterPenalty, bonus) {
   return {
     roundNumber: round.roundNumber,
     theme: round.theme,
+    sortMode: round.sortMode || room.settings.sortMode,
+    arrangedCardIds: Array.isArray(round.arrangedCardIds) ? [...round.arrangedCardIds] : [],
     playerIds: getRoundPlayerIds(room, round),
     cards: round.cards.map((card) => ({
       id: card.id,
@@ -1762,6 +1947,89 @@ function isRoundParticipant(room, round, playerId) {
 function countRoundVotes(round, playerIds) {
   const eligibleVoters = new Set(playerIds);
   return Object.keys(round.votes || {}).filter((playerId) => eligibleVoters.has(playerId)).length;
+}
+
+function getRoundSortMode(room, round) {
+  return (round && round.sortMode) || room.settings.sortMode;
+}
+
+function isPattern2Round(room, round) {
+  return getRoundSortMode(room, round) === "pattern2";
+}
+
+function requirePattern2Round(room, round) {
+  if (!isPattern2Round(room, round)) throw new Error("全カード一括のラウンドではありません。");
+}
+
+function getPattern2CardIds(round) {
+  const validIds = new Set(round.cards.map((card) => card.id));
+  const arrangedIds = Array.isArray(round.arrangedCardIds) ? round.arrangedCardIds : [];
+  const ids = [];
+  for (const cardId of arrangedIds) {
+    if (validIds.has(cardId) && !ids.includes(cardId)) ids.push(cardId);
+  }
+  for (const card of round.cards) {
+    if (!ids.includes(card.id)) ids.push(card.id);
+  }
+  return ids;
+}
+
+function getPattern2OrderedCards(round) {
+  const cardsById = new Map(round.cards.map((card) => [card.id, card]));
+  return getPattern2CardIds(round)
+    .map((cardId) => cardsById.get(cardId))
+    .filter(Boolean);
+}
+
+function moveBefore(ids, cardId, targetCardId) {
+  const nextIds = ids.filter((id) => id !== cardId);
+  const targetIndex = nextIds.indexOf(targetCardId);
+  if (targetIndex < 0) return ids;
+  nextIds.splice(targetIndex, 0, cardId);
+  return nextIds;
+}
+
+function getPattern2FailedCardIds(orderedCards) {
+  const failedIds = new Set();
+  let maxNumber = -Infinity;
+  for (const card of orderedCards) {
+    if (card.number < maxNumber) {
+      failedIds.add(card.id);
+    } else {
+      maxNumber = card.number;
+    }
+  }
+  return failedIds;
+}
+
+function getPattern2LifeLoss(numbers, rule) {
+  if (!hasInversion(numbers)) return 0;
+  if (rule === "moved") return numbers.length - longestIncreasingSubsequenceLength(numbers);
+  return 1;
+}
+
+function hasInversion(numbers) {
+  let maxNumber = -Infinity;
+  for (const number of numbers) {
+    if (number < maxNumber) return true;
+    maxNumber = number;
+  }
+  return false;
+}
+
+function longestIncreasingSubsequenceLength(numbers) {
+  const tails = [];
+  for (const number of numbers) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (tails[middle] < number) low = middle + 1;
+      else high = middle;
+    }
+    tails[low] = number;
+  }
+  return tails.length;
 }
 
 function getOwnActiveRoundCards() {
@@ -1988,8 +2256,18 @@ function sortModeLabel(value) {
   return value === "pattern2" ? "全カード一括" : "1枚ずつ";
 }
 
+function lifeRuleLabel(settings) {
+  return settings.sortMode === "pattern2"
+    ? pattern2LifeRuleLabel(settings.pattern2LifeRule)
+    : pattern1LifeRuleLabel(settings.pattern1LifeRule);
+}
+
 function pattern1LifeRuleLabel(value) {
   return value === "skipped" ? "飛ばした枚数分" : "一律 -1";
+}
+
+function pattern2LifeRuleLabel(value) {
+  return value === "moved" ? "最小移動枚数分" : "一律 -1";
 }
 
 function inputVisibilityLabel(value) {

@@ -905,6 +905,88 @@ legend {
   gap: 14px;
 }
 
+.arrange-board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px;
+}
+
+.arrange-card {
+  display: grid;
+  grid-template-rows: auto minmax(68px, 1fr) auto auto;
+  gap: 10px;
+  min-height: 188px;
+  padding: 14px;
+  color: #345f68;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 251, 255, 0.94)),
+    var(--paper-sky);
+  border: 2px dashed #a8d8dc;
+  border-radius: 8px;
+}
+
+.arrange-card.editable {
+  cursor: grab;
+}
+
+.arrange-card.editable:active {
+  cursor: grabbing;
+}
+
+.arrange-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.arrange-position {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  color: #256f82;
+  background: linear-gradient(145deg, #e8f9ff, #eff8d9);
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #add6d5;
+  font-weight: 950;
+}
+
+.arrange-card .hidden-number {
+  display: grid;
+  place-items: center;
+  min-width: 48px;
+  height: 48px;
+  color: #667174;
+  background:
+    linear-gradient(145deg, #f7f9f9, #dfe8e7);
+  border: 3px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #c6d2d0;
+  font-size: 1.62rem;
+  font-weight: 950;
+}
+
+.arrange-card p {
+  overflow-wrap: anywhere;
+  color: #345f68;
+  font-size: 1.08rem;
+  font-weight: 900;
+  line-height: 1.4;
+}
+
+.arrange-card small {
+  color: var(--subtle);
+  font-weight: 800;
+}
+
+.arrange-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .hint-card {
   display: grid;
   gap: 12px;
